@@ -2,11 +2,9 @@ from fastapi import FastAPI, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import joblib
-import math
 import re
 import json
 import hashlib
-import asyncio
 import tldextract
 import redis
 import aiohttp
@@ -18,7 +16,8 @@ import base64
 from datetime import datetime
 
 load_dotenv()
-VT_API_KEY = os.getenv("VT_API_KEY", "")
+VT_API_KEY   = os.getenv("VT_API_KEY", "")
+REDIS_URL    = os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
 
 app = FastAPI(title="Phishing Detector API v2")
 
@@ -27,12 +26,19 @@ def startup():
     init_db()
 
 print("Loading models...")
-rf  = joblib.load("model_rf_v2.pkl")
-xgb = joblib.load("model_xgb_v2.pkl")
+rf           = joblib.load("model_rf_v2.pkl")
+xgb          = joblib.load("model_xgb_v2.pkl")
 FEATURE_COLS = joblib.load("feature_cols_v2.pkl")
 print(f"Models loaded. Features: {len(FEATURE_COLS)}")
 
-cache = redis.Redis(host="127.0.0.1", port=6379, db=0, decode_responses=True)
+# Redis — graceful fallback if not available
+try:
+    cache = redis.from_url(REDIS_URL, decode_responses=True)
+    cache.ping()
+    print("Redis connected")
+except:
+    cache = None
+    print("Redis not available — running without cache")
 
 TRUSTED_DOMAINS = {
     "github.com","google.com","microsoft.com","apple.com","amazon.com",
@@ -45,8 +51,7 @@ TRUSTED_DOMAINS = {
     "bitbucket.org","heroku.com","digitalocean.com","linode.com",
     "stripe.com","twilio.com","sendgrid.com","mongodb.com","firebase.com",
     "notion.so","figma.com","canva.com","trello.com","slack.com",
-    "zoom.us","teams.microsoft.com","dropbox.com","onedrive.com",
-    "drive.google.com","docs.google.com","sheets.google.com"
+    "zoom.us","dropbox.com","onedrive.com"
 }
 
 RISKY_TLDS = {"tk","ml","ga","cf","gq","top","xyz","club","online","site",
@@ -85,36 +90,36 @@ def extract_features(url: str) -> dict:
 
         features = {}
         features.update(char_counts(url, "url"))
-        features["qty_tld_url"]          = url.lower().count(ext.suffix) if ext.suffix else 0
-        features["length_url"]           = len(url)
+        features["qty_tld_url"]             = url.lower().count(ext.suffix) if ext.suffix else 0
+        features["length_url"]              = len(url)
         features.update(char_counts(domain, "domain"))
-        features["qty_vowels_domain"]    = sum(domain.count(v) for v in "aeiou")
-        features["domain_length"]        = len(domain)
-        features["domain_in_ip"]         = int(bool(re.match(r"^\d+\.\d+\.\d+\.\d+$", ext.domain)))
-        features["server_client_domain"] = int("server" in domain or "client" in domain)
+        features["qty_vowels_domain"]       = sum(domain.count(v) for v in "aeiou")
+        features["domain_length"]           = len(domain)
+        features["domain_in_ip"]            = int(bool(re.match(r"^\d+\.\d+\.\d+\.\d+$", ext.domain)))
+        features["server_client_domain"]    = int("server" in domain or "client" in domain)
         features.update(char_counts(directory, "directory"))
-        features["directory_length"]     = len(directory)
+        features["directory_length"]        = len(directory)
         features.update(char_counts(file_part, "file"))
-        features["file_length"]          = len(file_part)
+        features["file_length"]             = len(file_part)
         features.update(char_counts(params, "params"))
-        features["params_length"]        = len(params)
-        features["tld_present_params"]   = int(ext.suffix in params if ext.suffix else False)
-        features["qty_params"]           = len(params.split("&")) if params else 0
-        features["email_in_url"]         = int("@" in url and "mailto" in url.lower())
-        features["time_response"]        = -1
-        features["domain_spf"]           = -1
-        features["asn_ip"]               = -1
+        features["params_length"]           = len(params)
+        features["tld_present_params"]      = int(ext.suffix in params if ext.suffix else False)
+        features["qty_params"]              = len(params.split("&")) if params else 0
+        features["email_in_url"]            = int("@" in url and "mailto" in url.lower())
+        features["time_response"]           = -1
+        features["domain_spf"]              = -1
+        features["asn_ip"]                  = -1
         features["time_domain_activation"]  = -1
         features["time_domain_expiration"]  = -1
-        features["qty_ip_resolved"]      = -1
-        features["qty_nameservers"]      = -1
-        features["qty_mx_servers"]       = -1
-        features["ttl_hostname"]         = -1
-        features["tls_ssl_certificate"]  = int(url.startswith("https"))
-        features["qty_redirects"]        = 0
-        features["url_google_index"]     = -1
-        features["domain_google_index"]  = -1
-        features["url_shortened"]        = int(ext.domain in [
+        features["qty_ip_resolved"]         = -1
+        features["qty_nameservers"]         = -1
+        features["qty_mx_servers"]          = -1
+        features["ttl_hostname"]            = -1
+        features["tls_ssl_certificate"]     = int(url.startswith("https"))
+        features["qty_redirects"]           = 0
+        features["url_google_index"]        = -1
+        features["domain_google_index"]     = -1
+        features["url_shortened"]           = int(ext.domain in [
             "bit","tinyurl","goo","ow","t","is","cli","yfrog","migre",
             "ff","url4","twit","su","snipurl","short","ping","post"
         ])
@@ -168,14 +173,9 @@ def get_signals(url: str, score: float, vt: dict) -> list:
 
 @app.get("/")
 def root():
-    try:
-        cache.ping()
-        redis_status = "connected"
-    except:
-        redis_status = "disconnected"
     return {
         "status":     "Phishing Detector API v2",
-        "redis":      redis_status,
+        "redis":      "connected" if cache else "disabled",
         "vt_enabled": bool(VT_API_KEY)
     }
 
@@ -186,7 +186,7 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
 
     # 1. Redis cache
     try:
-        cached = cache.get(key)
+        cached = cache.get(key) if cache else None
         if cached:
             result = json.loads(cached)
             result["cached"] = True
@@ -205,7 +205,7 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
                         "vt_malicious": 0, "vt_total": 0}
         }
         try:
-            cache.set(key, json.dumps(result), ex=21600)
+            if cache: cache.set(key, json.dumps(result), ex=21600)
         except:
             pass
         return result
@@ -272,7 +272,7 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     }
 
     try:
-        cache.set(key, json.dumps(result), ex=ttl)
+        if cache: cache.set(key, json.dumps(result), ex=ttl)
     except:
         pass
 
@@ -298,13 +298,13 @@ def get_logs(limit: int = 50, db: Session = Depends(get_db)):
     logs = db.query(ThreatLog).order_by(ThreatLog.timestamp.desc()).limit(limit).all()
     return [
         {
-            "id":          l.id,
-            "url":         l.url,
-            "score":       l.score,
-            "verdict":     l.verdict,
-            "signals":     json.loads(l.signals or "[]"),
-            "vt_malicious":l.vt_malicious,
-            "timestamp":   str(l.timestamp)
+            "id":           l.id,
+            "url":          l.url,
+            "score":        l.score,
+            "verdict":      l.verdict,
+            "signals":      json.loads(l.signals or "[]"),
+            "vt_malicious": l.vt_malicious,
+            "timestamp":    str(l.timestamp)
         }
         for l in logs
     ]
