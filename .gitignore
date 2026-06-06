@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.db
+vrbancic.csv
+model_rf.pkl
+model_xgb.pkl
