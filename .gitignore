@@ -4,3 +4,4 @@ __pycache__/
 vrbancic.csv
 model_rf.pkl
 model_xgb.pkl
+*.pyc
