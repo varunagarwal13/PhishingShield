@@ -5,19 +5,21 @@ import joblib
 import re
 import json
 import hashlib
+import asyncio
 import tldextract
 import redis
 import aiohttp
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from database import init_db, get_db, ThreatLog, FeedbackLog
+from bs4 import BeautifulSoup
 import os
 import base64
 from datetime import datetime
 
 load_dotenv()
-VT_API_KEY   = os.getenv("VT_API_KEY", "")
-REDIS_URL    = os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
+VT_API_KEY = os.getenv("VT_API_KEY", "")
+REDIS_URL  = os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
 
 app = FastAPI(title="Phishing Detector API v2")
 
@@ -29,16 +31,24 @@ print("Loading models...")
 rf           = joblib.load("model_rf_v2.pkl")
 xgb          = joblib.load("model_xgb_v2.pkl")
 FEATURE_COLS = joblib.load("feature_cols_v2.pkl")
-print(f"Models loaded. Features: {len(FEATURE_COLS)}")
+print(f"ML models loaded. Features: {len(FEATURE_COLS)}")
 
-# Redis — graceful fallback if not available
+try:
+    nlp_vectorizer = joblib.load("nlp_vectorizer.pkl")
+    nlp_clf        = joblib.load("nlp_model.pkl")
+    NLP_ENABLED    = True
+    print("NLP model loaded.")
+except:
+    NLP_ENABLED = False
+    print("NLP model not found — skipping.")
+
 try:
     cache = redis.from_url(REDIS_URL, decode_responses=True)
     cache.ping()
-    print("Redis connected")
+    print("Redis connected.")
 except:
     cache = None
-    print("Redis not available — running without cache")
+    print("Redis not available — running without cache.")
 
 TRUSTED_DOMAINS = {
     "github.com","google.com","microsoft.com","apple.com","amazon.com",
@@ -51,7 +61,7 @@ TRUSTED_DOMAINS = {
     "bitbucket.org","heroku.com","digitalocean.com","linode.com",
     "stripe.com","twilio.com","sendgrid.com","mongodb.com","firebase.com",
     "notion.so","figma.com","canva.com","trello.com","slack.com",
-    "zoom.us","dropbox.com","onedrive.com"
+    "zoom.us","dropbox.com","onedrive.com","x.com"
 }
 
 RISKY_TLDS = {"tk","ml","ga","cf","gq","top","xyz","club","online","site",
@@ -128,6 +138,34 @@ def extract_features(url: str) -> dict:
         print(f"Feature extraction error: {e}")
         return {col: -1 for col in FEATURE_COLS}
 
+async def fetch_page_text(url: str) -> str:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=4),
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+                ssl=False
+            ) as resp:
+                html = await resp.text()
+                soup = BeautifulSoup(html, "html.parser")
+                for tag in soup(["script","style","meta","link"]):
+                    tag.decompose()
+                text = soup.get_text(separator=" ", strip=True)
+                return text[:3000]
+    except:
+        return ""
+
+def nlp_score(text: str) -> float:
+    if not NLP_ENABLED or not text:
+        return 0.0
+    try:
+        vec  = nlp_vectorizer.transform([text])
+        prob = float(nlp_clf.predict_proba(vec)[0][1])
+        return prob
+    except:
+        return 0.0
+
 async def check_virustotal(url: str) -> dict:
     if not VT_API_KEY:
         return {"vt_malicious": 0, "vt_total": 0, "vt_checked": False}
@@ -152,7 +190,7 @@ async def check_virustotal(url: str) -> dict:
         print(f"VT error: {e}")
     return {"vt_malicious": 0, "vt_total": 0, "vt_checked": False}
 
-def get_signals(url: str, score: float, vt: dict) -> list:
+def get_signals(url: str, score: float, vt: dict, nlp_prob: float) -> list:
     signals = []
     ext = tldextract.extract(url)
     if ext.suffix and ext.suffix.split(".")[-1] in RISKY_TLDS:
@@ -169,14 +207,17 @@ def get_signals(url: str, score: float, vt: dict) -> list:
         signals.append("No HTTPS")
     if vt["vt_checked"] and vt["vt_malicious"] > 0:
         signals.append(f"VirusTotal: {vt['vt_malicious']}/{vt['vt_total']} engines flagged")
+    if nlp_prob > 0.7:
+        signals.append("Urgent/suspicious page content detected")
     return signals[:3]
 
 @app.get("/")
 def root():
     return {
-        "status":     "Phishing Detector API v2",
-        "redis":      "connected" if cache else "disabled",
-        "vt_enabled": bool(VT_API_KEY)
+        "status":      "Phishing Detector API v2",
+        "redis":       "connected" if cache else "disabled",
+        "vt_enabled":  bool(VT_API_KEY),
+        "nlp_enabled": NLP_ENABLED
     }
 
 @app.post("/check")
@@ -202,7 +243,8 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             "url": url, "score": 0.0, "verdict": "ALLOW",
             "signals": [], "cached": False,
             "details": {"rf_score": 0.0, "xgb_score": 0.0,
-                        "vt_malicious": 0, "vt_total": 0}
+                        "vt_malicious": 0, "vt_total": 0,
+                        "nlp_score": 0.0, "nlp_boost": 0.0}
         }
         try:
             if cache: cache.set(key, json.dumps(result), ex=21600)
@@ -210,22 +252,32 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             pass
         return result
 
-    # 3. ML scoring + VT
+    # 3. ML + VT + NLP in parallel
     features       = extract_features(url)
     feature_values = [[features.get(col, -1) for col in FEATURE_COLS]]
     rf_prob        = float(rf.predict_proba(feature_values)[0][1])
     xgb_prob       = float(xgb.predict_proba(feature_values)[0][1])
     ensemble_prob  = (rf_prob + xgb_prob) / 2
-    vt             = await check_virustotal(url)
 
-    ml_score = ensemble_prob * 100
-    vt_boost = 0
+    vt, page_text = await asyncio.gather(
+        check_virustotal(url),
+        fetch_page_text(url)
+    )
+    nlp_prob = nlp_score(page_text)
+
+    ml_score  = ensemble_prob * 100
+    vt_boost  = 0.0
+    nlp_boost = 0.0
+
     if vt["vt_checked"] and vt["vt_total"] > 0:
         vt_ratio = vt["vt_malicious"] / vt["vt_total"]
         vt_boost = vt_ratio * 30
 
-    score   = min(round(ml_score + vt_boost, 1), 100.0)
-    signals = get_signals(url, score, vt)
+    if nlp_prob > 0.7:
+        nlp_boost = (nlp_prob - 0.7) * 20
+
+    score   = min(round(ml_score + vt_boost + nlp_boost, 1), 100.0)
+    signals = get_signals(url, score, vt, nlp_prob)
 
     if score >= 70:
         verdict = "BLOCK"
@@ -267,7 +319,9 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             "xgb_score":    round(xgb_prob * 100, 1),
             "vt_malicious": vt["vt_malicious"],
             "vt_total":     vt["vt_total"],
-            "vt_boost":     round(vt_boost, 1)
+            "vt_boost":     round(vt_boost, 1),
+            "nlp_score":    round(nlp_prob * 100, 1),
+            "nlp_boost":    round(nlp_boost, 1)
         }
     }
 
