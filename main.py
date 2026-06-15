@@ -18,10 +18,11 @@ import base64
 from datetime import datetime
 
 load_dotenv()
-VT_API_KEY = os.getenv("VT_API_KEY", "")
-REDIS_URL  = os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
+VT_API_KEY  = os.getenv("VT_API_KEY", "")
+GSB_API_KEY = os.getenv("GSB_API_KEY", "")
+REDIS_URL   = os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
 
-app = FastAPI(title="Phishing Detector API v2")
+app = FastAPI(title="Phishing Detector API v3")
 
 @app.on_event("startup")
 def startup():
@@ -40,7 +41,7 @@ try:
     print("NLP model loaded.")
 except:
     NLP_ENABLED = False
-    print("NLP model not found — skipping.")
+    print("NLP model not found.")
 
 try:
     cache = redis.from_url(REDIS_URL, decode_responses=True)
@@ -48,7 +49,7 @@ try:
     print("Redis connected.")
 except:
     cache = None
-    print("Redis not available — running without cache.")
+    print("Redis not available.")
 
 TRUSTED_DOMAINS = {
     "github.com","google.com","microsoft.com","apple.com","amazon.com",
@@ -58,14 +59,19 @@ TRUSTED_DOMAINS = {
     "anthropic.com","openai.com","cloudflare.com","amazonaws.com",
     "docker.com","render.com","railway.app","vercel.com","netlify.com",
     "pypi.org","npmjs.com","medium.com","dev.to","gitlab.com",
-    "bitbucket.org","heroku.com","digitalocean.com","linode.com",
-    "stripe.com","twilio.com","sendgrid.com","mongodb.com","firebase.com",
-    "notion.so","figma.com","canva.com","trello.com","slack.com",
-    "zoom.us","dropbox.com","onedrive.com","x.com"
+    "bitbucket.org","heroku.com","digitalocean.com","stripe.com",
+    "notion.so","figma.com","slack.com","zoom.us","dropbox.com","x.com",
+    "flipkart.com","irctc.co.in","naukri.com","indianexpress.com"
 }
 
 RISKY_TLDS = {"tk","ml","ga","cf","gq","top","xyz","club","online","site",
               "work","party","live","click","link","win","loan","download"}
+
+BRAND_NAMES_LEV = [
+    "paypal","google","amazon","facebook","netflix","apple","microsoft",
+    "sbi","hdfc","icici","paytm","instagram","twitter","linkedin",
+    "chase","wellsfargo","bankofamerica","dropbox","github","steam"
+]
 
 class URLRequest(BaseModel):
     url: str
@@ -75,7 +81,30 @@ class FeedbackRequest(BaseModel):
     feedback: str
 
 def cache_key(url: str) -> str:
-    return f"phish2:url:{hashlib.md5(url.encode()).hexdigest()}"
+    return f"phish3:url:{hashlib.md5(url.encode()).hexdigest()}"
+
+def levenshtein(s1: str, s2: str) -> int:
+    if len(s1) < len(s2):
+        return levenshtein(s2, s1)
+    if not s2:
+        return len(s1)
+    prev = list(range(len(s2) + 1))
+    for c1 in s1:
+        curr = [prev[0] + 1]
+        for j, c2 in enumerate(s2):
+            curr.append(min(prev[j+1]+1, curr[j]+1, prev[j]+(c1!=c2)))
+        prev = curr
+    return prev[-1]
+
+def check_typosquatting(url: str) -> dict:
+    ext     = tldextract.extract(url)
+    domain  = ext.domain.lower()
+    if len(domain) < 4:
+        return {"is_typosquat": False, "closest_brand": None, "distance": 99}
+    min_dist = min(levenshtein(domain, brand) for brand in BRAND_NAMES_LEV)
+    closest  = min(BRAND_NAMES_LEV, key=lambda b: levenshtein(domain, b))
+    is_typo  = 0 < min_dist <= 2
+    return {"is_typosquat": is_typo, "closest_brand": closest, "distance": min_dist}
 
 def extract_features(url: str) -> dict:
     try:
@@ -147,6 +176,8 @@ async def fetch_page_text(url: str) -> str:
                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
                 ssl=False
             ) as resp:
+                if resp.status != 200:
+                    return ""
                 html = await resp.text()
                 soup = BeautifulSoup(html, "html.parser")
                 for tag in soup(["script","style","meta","link"]):
@@ -161,8 +192,7 @@ def nlp_score(text: str) -> float:
         return 0.0
     try:
         vec  = nlp_vectorizer.transform([text])
-        prob = float(nlp_clf.predict_proba(vec)[0][1])
-        return prob
+        return float(nlp_clf.predict_proba(vec)[0][1])
     except:
         return 0.0
 
@@ -186,11 +216,72 @@ async def check_virustotal(url: str) -> dict:
                         "vt_total":     sum(stats.values()),
                         "vt_checked":   True
                     }
+                elif resp.status == 404:
+                    # Submit URL to VT for future scanning
+                    try:
+                        async with session.post(
+                            "https://www.virustotal.com/api/v3/urls",
+                            headers=headers,
+                            data={"url": url},
+                            timeout=aiohttp.ClientTimeout(total=3)
+                        ) as _:
+                            pass
+                    except:
+                        pass
     except Exception as e:
         print(f"VT error: {e}")
     return {"vt_malicious": 0, "vt_total": 0, "vt_checked": False}
 
-def get_signals(url: str, score: float, vt: dict, nlp_prob: float) -> list:
+async def check_google_safe_browsing(url: str) -> dict:
+    if not GSB_API_KEY:
+        return {"gsb_match": False, "threat_type": None}
+    try:
+        payload = {
+            "client": {"clientId": "phishing-detector", "clientVersion": "1.0"},
+            "threatInfo": {
+                "threatTypes": [
+                    "MALWARE", "SOCIAL_ENGINEERING",
+                    "UNWANTED_SOFTWARE", "POTENTIALLY_HARMFUL_APPLICATION"
+                ],
+                "platformTypes": ["ANY_PLATFORM"],
+                "threatEntryTypes": ["URL"],
+                "threatEntries": [{"url": url}]
+            }
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={GSB_API_KEY}",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=4)
+            ) as resp:
+                if resp.status == 200:
+                    data    = await resp.json()
+                    matches = data.get("matches", [])
+                    if matches:
+                        return {
+                            "gsb_match":   True,
+                            "threat_type": matches[0].get("threatType", "UNKNOWN")
+                        }
+        return {"gsb_match": False, "threat_type": None}
+    except Exception as e:
+        print(f"GSB error: {e}")
+        return {"gsb_match": False, "threat_type": None}
+
+async def check_phash(url: str) -> dict:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "http://127.0.0.1:8001/check",
+                json={"url": url},
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+    except:
+        pass
+    return {"is_clone": False, "brand": None, "distance": None}
+
+def get_signals(url, score, vt, nlp_prob, phash, gsb, typo) -> list:
     signals = []
     ext = tldextract.extract(url)
     if ext.suffix and ext.suffix.split(".")[-1] in RISKY_TLDS:
@@ -207,16 +298,23 @@ def get_signals(url: str, score: float, vt: dict, nlp_prob: float) -> list:
         signals.append("No HTTPS")
     if vt["vt_checked"] and vt["vt_malicious"] > 0:
         signals.append(f"VirusTotal: {vt['vt_malicious']}/{vt['vt_total']} engines flagged")
+    if gsb.get("gsb_match"):
+        signals.append(f"Google Safe Browsing: {gsb.get('threat_type','threat')} detected")
     if nlp_prob > 0.7:
         signals.append("Urgent/suspicious page content detected")
+    if phash.get("is_clone") and phash.get("brand"):
+        signals.append(f"Visual clone of {phash['brand'].upper()} detected")
+    if typo.get("is_typosquat"):
+        signals.append(f"Typosquatting: resembles {typo['closest_brand']} (distance {typo['distance']})")
     return signals[:3]
 
 @app.get("/")
 def root():
     return {
-        "status":      "Phishing Detector API v2",
+        "status":      "Phishing Detector API v3",
         "redis":       "connected" if cache else "disabled",
         "vt_enabled":  bool(VT_API_KEY),
+        "gsb_enabled": bool(GSB_API_KEY),
         "nlp_enabled": NLP_ENABLED
     }
 
@@ -242,9 +340,14 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
         result = {
             "url": url, "score": 0.0, "verdict": "ALLOW",
             "signals": [], "cached": False,
-            "details": {"rf_score": 0.0, "xgb_score": 0.0,
-                        "vt_malicious": 0, "vt_total": 0,
-                        "nlp_score": 0.0, "nlp_boost": 0.0}
+            "details": {
+                "rf_score": 0.0, "xgb_score": 0.0,
+                "vt_malicious": 0, "vt_total": 0,
+                "nlp_score": 0.0, "nlp_boost": 0.0,
+                "phash_clone": False, "phash_brand": None, "phash_boost": 0.0,
+                "gsb_match": False, "gsb_threat": None,
+                "typosquat": False, "typo_boost": 0.0
+            }
         }
         try:
             if cache: cache.set(key, json.dumps(result), ex=21600)
@@ -252,32 +355,48 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             pass
         return result
 
-    # 3. ML + VT + NLP in parallel
+    # 3. ML scoring
     features       = extract_features(url)
     feature_values = [[features.get(col, -1) for col in FEATURE_COLS]]
     rf_prob        = float(rf.predict_proba(feature_values)[0][1])
     xgb_prob       = float(xgb.predict_proba(feature_values)[0][1])
     ensemble_prob  = (rf_prob + xgb_prob) / 2
 
-    vt, page_text = await asyncio.gather(
+    # 4. Run all checks in parallel
+    vt, page_text, phash_result, gsb = await asyncio.gather(
         check_virustotal(url),
-        fetch_page_text(url)
+        fetch_page_text(url),
+        check_phash(url),
+        check_google_safe_browsing(url)
     )
     nlp_prob = nlp_score(page_text)
+    typo     = check_typosquatting(url)
 
-    ml_score  = ensemble_prob * 100
-    vt_boost  = 0.0
-    nlp_boost = 0.0
+    # 5. Combine scores
+    ml_score    = ensemble_prob * 100
+    vt_boost    = 0.0
+    nlp_boost   = 0.0
+    phash_boost = 0.0
+    gsb_boost   = 0.0
+    typo_boost  = 0.0
 
     if vt["vt_checked"] and vt["vt_total"] > 0:
-        vt_ratio = vt["vt_malicious"] / vt["vt_total"]
-        vt_boost = vt_ratio * 30
+        vt_boost = (vt["vt_malicious"] / vt["vt_total"]) * 30
 
     if nlp_prob > 0.7:
         nlp_boost = (nlp_prob - 0.7) * 20
 
-    score   = min(round(ml_score + vt_boost + nlp_boost, 1), 100.0)
-    signals = get_signals(url, score, vt, nlp_prob)
+    if phash_result.get("is_clone") and phash_result.get("brand"):
+        phash_boost = 40.0
+
+    if gsb.get("gsb_match"):
+        gsb_boost = 40.0
+
+    if typo.get("is_typosquat"):
+        typo_boost = 25.0
+
+    score   = min(round(ml_score + vt_boost + nlp_boost + phash_boost + gsb_boost + typo_boost, 1), 100.0)
+    signals = get_signals(url, score, vt, nlp_prob, phash_result, gsb, typo)
 
     if score >= 70:
         verdict = "BLOCK"
@@ -289,7 +408,7 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
         verdict = "ALLOW"
         ttl     = 3600
 
-    # 4. Log to database
+    # 6. Log to database
     try:
         log = ThreatLog(
             url          = url[:2048],
@@ -321,7 +440,16 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             "vt_total":     vt["vt_total"],
             "vt_boost":     round(vt_boost, 1),
             "nlp_score":    round(nlp_prob * 100, 1),
-            "nlp_boost":    round(nlp_boost, 1)
+            "nlp_boost":    round(nlp_boost, 1),
+            "phash_clone":  bool(phash_result.get("is_clone", False)),
+            "phash_brand":  phash_result.get("brand"),
+            "phash_boost":  phash_boost,
+            "gsb_match":    gsb.get("gsb_match", False),
+            "gsb_threat":   gsb.get("threat_type"),
+            "gsb_boost":    gsb_boost,
+            "typosquat":    typo.get("is_typosquat", False),
+            "typo_brand":   typo.get("closest_brand"),
+            "typo_boost":   typo_boost
         }
     }
 
@@ -343,7 +471,7 @@ def submit_feedback(request: FeedbackRequest, db: Session = Depends(get_db)):
         )
         db.add(fb)
         db.commit()
-        return {"status": "feedback recorded", "url": request.url, "feedback": request.feedback}
+        return {"status": "feedback recorded"}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
