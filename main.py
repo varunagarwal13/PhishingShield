@@ -16,13 +16,14 @@ from bs4 import BeautifulSoup
 import os
 import base64
 from datetime import datetime
+from extract_advanced_features import extract_advanced_features
 
 load_dotenv()
 VT_API_KEY  = os.getenv("VT_API_KEY", "")
 GSB_API_KEY = os.getenv("GSB_API_KEY", "")
 REDIS_URL   = os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
 
-app = FastAPI(title="Phishing Detector API v3")
+app = FastAPI(title="Phishing Detector API v4")
 
 @app.on_event("startup")
 def startup():
@@ -64,6 +65,13 @@ TRUSTED_DOMAINS = {
     "flipkart.com","irctc.co.in","naukri.com","indianexpress.com"
 }
 
+CLOUD_SUBDOMAINS = {
+    "sites.google.com", "docs.google.com", "drive.google.com",
+    "web.app", "firebaseapp.com", "pages.dev", "workers.dev",
+    "azurewebsites.net", "github.io", "netlify.app", "vercel.app",
+    "glitch.me", "weebly.com", "wixsite.com", "sharepoint.com"
+}
+
 RISKY_TLDS = {"tk","ml","ga","cf","gq","top","xyz","club","online","site",
               "work","party","live","click","link","win","loan","download"}
 
@@ -81,7 +89,7 @@ class FeedbackRequest(BaseModel):
     feedback: str
 
 def cache_key(url: str) -> str:
-    return f"phish3:url:{hashlib.md5(url.encode()).hexdigest()}"
+    return f"phish4:url:{hashlib.md5(url.encode()).hexdigest()}"
 
 def levenshtein(s1: str, s2: str) -> int:
     if len(s1) < len(s2):
@@ -217,7 +225,6 @@ async def check_virustotal(url: str) -> dict:
                         "vt_checked":   True
                     }
                 elif resp.status == 404:
-                    # Submit URL to VT for future scanning
                     try:
                         async with session.post(
                             "https://www.virustotal.com/api/v3/urls",
@@ -281,7 +288,8 @@ async def check_phash(url: str) -> dict:
         pass
     return {"is_clone": False, "brand": None, "distance": None}
 
-def get_signals(url, score, vt, nlp_prob, phash, gsb, typo) -> list:
+def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None) -> list:
+    adv = adv or {}
     signals = []
     ext = tldextract.extract(url)
     if ext.suffix and ext.suffix.split(".")[-1] in RISKY_TLDS:
@@ -306,12 +314,20 @@ def get_signals(url, score, vt, nlp_prob, phash, gsb, typo) -> list:
         signals.append(f"Visual clone of {phash['brand'].upper()} detected")
     if typo.get("is_typosquat"):
         signals.append(f"Typosquatting: resembles {typo['closest_brand']} (distance {typo['distance']})")
+    if adv.get("has_unicode"):
+        signals.append("Unicode/Cyrillic homoglyph domain detected")
+    elif adv.get("has_homoglyph"):
+        signals.append("Character substitution homoglyph detected")
+    if adv.get("is_cloud_hosted") and adv.get("cloud_suspicious"):
+        signals.append("Suspicious content hosted on cloud platform")
+    if adv.get("is_high_entropy"):
+        signals.append("High domain randomness (AI-generated pattern)")
     return signals[:3]
 
 @app.get("/")
 def root():
     return {
-        "status":      "Phishing Detector API v3",
+        "status":      "Phishing Detector API v4",
         "redis":       "connected" if cache else "disabled",
         "vt_enabled":  bool(VT_API_KEY),
         "gsb_enabled": bool(GSB_API_KEY),
@@ -323,7 +339,6 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     url = request.url.strip()
     key = cache_key(url)
 
-    # 1. Redis cache
     try:
         cached = cache.get(key) if cache else None
         if cached:
@@ -333,10 +348,12 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     except Exception as e:
         print(f"Cache read error: {e}")
 
-    # 2. Trusted domain whitelist
     ext               = tldextract.extract(url)
     registered_domain = f"{ext.domain}.{ext.suffix}"
-    if registered_domain in TRUSTED_DOMAINS:
+    full_domain       = f"{ext.subdomain}.{registered_domain}" if ext.subdomain else registered_domain
+    is_cloud_subdomain = any(full_domain.endswith(c) for c in CLOUD_SUBDOMAINS)
+
+    if registered_domain in TRUSTED_DOMAINS and not is_cloud_subdomain:
         result = {
             "url": url, "score": 0.0, "verdict": "ALLOW",
             "signals": [], "cached": False,
@@ -346,7 +363,9 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
                 "nlp_score": 0.0, "nlp_boost": 0.0,
                 "phash_clone": False, "phash_brand": None, "phash_boost": 0.0,
                 "gsb_match": False, "gsb_threat": None,
-                "typosquat": False, "typo_boost": 0.0
+                "typosquat": False, "typo_boost": 0.0,
+                "homoglyph": False, "unicode_spoof": False,
+                "cloud_hosted": False, "high_entropy": False, "adv_boost": 0.0
             }
         }
         try:
@@ -355,14 +374,12 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             pass
         return result
 
-    # 3. ML scoring
     features       = extract_features(url)
     feature_values = [[features.get(col, -1) for col in FEATURE_COLS]]
     rf_prob        = float(rf.predict_proba(feature_values)[0][1])
     xgb_prob       = float(xgb.predict_proba(feature_values)[0][1])
     ensemble_prob  = (rf_prob + xgb_prob) / 2
 
-    # 4. Run all checks in parallel
     vt, page_text, phash_result, gsb = await asyncio.gather(
         check_virustotal(url),
         fetch_page_text(url),
@@ -371,14 +388,15 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     )
     nlp_prob = nlp_score(page_text)
     typo     = check_typosquatting(url)
+    adv      = extract_advanced_features(url)
 
-    # 5. Combine scores
     ml_score    = ensemble_prob * 100
     vt_boost    = 0.0
     nlp_boost   = 0.0
     phash_boost = 0.0
     gsb_boost   = 0.0
     typo_boost  = 0.0
+    adv_boost   = 0.0
 
     if vt["vt_checked"] and vt["vt_total"] > 0:
         vt_boost = (vt["vt_malicious"] / vt["vt_total"]) * 30
@@ -395,8 +413,16 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     if typo.get("is_typosquat"):
         typo_boost = 25.0
 
-    score   = min(round(ml_score + vt_boost + nlp_boost + phash_boost + gsb_boost + typo_boost, 1), 100.0)
-    signals = get_signals(url, score, vt, nlp_prob, phash_result, gsb, typo)
+    if adv.get("has_homoglyph"):
+        adv_boost += 30.0
+    if adv.get("is_cloud_hosted") and adv.get("cloud_suspicious"):
+        adv_boost += 30.0
+    if adv.get("is_high_entropy") or adv.get("is_low_vowel"):
+        adv_boost += 15.0
+    adv_boost = min(adv_boost, 50.0)
+
+    score   = min(round(ml_score + vt_boost + nlp_boost + phash_boost + gsb_boost + typo_boost + adv_boost, 1), 100.0)
+    signals = get_signals(url, score, vt, nlp_prob, phash_result, gsb, typo, adv)
 
     if score >= 70:
         verdict = "BLOCK"
@@ -408,7 +434,6 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
         verdict = "ALLOW"
         ttl     = 3600
 
-    # 6. Log to database
     try:
         log = ThreatLog(
             url          = url[:2048],
@@ -434,22 +459,27 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
         "signals": signals,
         "cached":  False,
         "details": {
-            "rf_score":     round(rf_prob * 100, 1),
-            "xgb_score":    round(xgb_prob * 100, 1),
-            "vt_malicious": vt["vt_malicious"],
-            "vt_total":     vt["vt_total"],
-            "vt_boost":     round(vt_boost, 1),
-            "nlp_score":    round(nlp_prob * 100, 1),
-            "nlp_boost":    round(nlp_boost, 1),
-            "phash_clone":  bool(phash_result.get("is_clone", False)),
-            "phash_brand":  phash_result.get("brand"),
-            "phash_boost":  phash_boost,
-            "gsb_match":    gsb.get("gsb_match", False),
-            "gsb_threat":   gsb.get("threat_type"),
-            "gsb_boost":    gsb_boost,
-            "typosquat":    typo.get("is_typosquat", False),
-            "typo_brand":   typo.get("closest_brand"),
-            "typo_boost":   typo_boost
+            "rf_score":      round(rf_prob * 100, 1),
+            "xgb_score":     round(xgb_prob * 100, 1),
+            "vt_malicious":  vt["vt_malicious"],
+            "vt_total":      vt["vt_total"],
+            "vt_boost":      round(vt_boost, 1),
+            "nlp_score":     round(nlp_prob * 100, 1),
+            "nlp_boost":     round(nlp_boost, 1),
+            "phash_clone":   bool(phash_result.get("is_clone", False)),
+            "phash_brand":   phash_result.get("brand"),
+            "phash_boost":   phash_boost,
+            "gsb_match":     gsb.get("gsb_match", False),
+            "gsb_threat":    gsb.get("threat_type"),
+            "gsb_boost":     gsb_boost,
+            "typosquat":     typo.get("is_typosquat", False),
+            "typo_brand":    typo.get("closest_brand"),
+            "typo_boost":    typo_boost,
+            "homoglyph":     bool(adv.get("has_homoglyph", False)),
+            "unicode_spoof": bool(adv.get("has_unicode", False)),
+            "cloud_hosted":  bool(adv.get("is_cloud_hosted", False)),
+            "high_entropy":  bool(adv.get("is_high_entropy", False)),
+            "adv_boost":     adv_boost
         }
     }
 
