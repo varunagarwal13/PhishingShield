@@ -17,13 +17,14 @@ import os
 import base64
 from datetime import datetime
 from extract_advanced_features import extract_advanced_features
+from fast_check import fast_definitive_check
 
 load_dotenv()
 VT_API_KEY  = os.getenv("VT_API_KEY", "")
 GSB_API_KEY = os.getenv("GSB_API_KEY", "")
 REDIS_URL   = os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
 
-app = FastAPI(title="Phishing Detector API v4")
+app = FastAPI(title="Phishing Detector API v5")
 
 @app.on_event("startup")
 def startup():
@@ -89,7 +90,7 @@ class FeedbackRequest(BaseModel):
     feedback: str
 
 def cache_key(url: str) -> str:
-    return f"phish4:url:{hashlib.md5(url.encode()).hexdigest()}"
+    return f"phish5:url:{hashlib.md5(url.encode()).hexdigest()}"
 
 def levenshtein(s1: str, s2: str) -> int:
     if len(s1) < len(s2):
@@ -204,7 +205,9 @@ def nlp_score(text: str) -> float:
     except:
         return 0.0
 
-async def check_virustotal(url: str) -> dict:
+async def check_virustotal(url: str, stop_event: asyncio.Event = None) -> dict:
+    """VT check. If 5+ engines flag malicious, sets stop_event so slower
+    modules (pHash) can be skipped — matches the design's early-exit pattern."""
     if not VT_API_KEY:
         return {"vt_malicious": 0, "vt_total": 0, "vt_checked": False}
     try:
@@ -217,10 +220,13 @@ async def check_virustotal(url: str) -> dict:
                 timeout=aiohttp.ClientTimeout(total=5)
             ) as resp:
                 if resp.status == 200:
-                    data  = await resp.json()
-                    stats = data["data"]["attributes"]["last_analysis_stats"]
+                    data      = await resp.json()
+                    stats     = data["data"]["attributes"]["last_analysis_stats"]
+                    malicious = stats.get("malicious", 0)
+                    if malicious >= 5 and stop_event is not None:
+                        stop_event.set()
                     return {
-                        "vt_malicious": stats.get("malicious", 0),
+                        "vt_malicious": malicious,
                         "vt_total":     sum(stats.values()),
                         "vt_checked":   True
                     }
@@ -288,8 +294,9 @@ async def check_phash(url: str) -> dict:
         pass
     return {"is_clone": False, "brand": None, "distance": None}
 
-def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None) -> list:
-    adv = adv or {}
+def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None, fast=None) -> list:
+    adv  = adv or {}
+    fast = fast or {}
     signals = []
     ext = tldextract.extract(url)
     if ext.suffix and ext.suffix.split(".")[-1] in RISKY_TLDS:
@@ -322,12 +329,14 @@ def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None) -> list:
         signals.append("Suspicious content hosted on cloud platform")
     if adv.get("is_high_entropy"):
         signals.append("High domain randomness (AI-generated pattern)")
+    for s in fast.get("signals", []):
+        signals.append(s)
     return signals[:3]
 
 @app.get("/")
 def root():
     return {
-        "status":      "Phishing Detector API v4",
+        "status":      "Phishing Detector API v5",
         "redis":       "connected" if cache else "disabled",
         "vt_enabled":  bool(VT_API_KEY),
         "gsb_enabled": bool(GSB_API_KEY),
@@ -365,7 +374,9 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
                 "gsb_match": False, "gsb_threat": None,
                 "typosquat": False, "typo_boost": 0.0,
                 "homoglyph": False, "unicode_spoof": False,
-                "cloud_hosted": False, "high_entropy": False, "adv_boost": 0.0
+                "cloud_hosted": False, "high_entropy": False, "adv_boost": 0.0,
+                "fast_check_used": False, "fast_boost": 0.0,
+                "early_exit_triggered": False
             }
         }
         try:
@@ -380,12 +391,32 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     xgb_prob       = float(xgb.predict_proba(feature_values)[0][1])
     ensemble_prob  = (rf_prob + xgb_prob) / 2
 
-    vt, page_text, phash_result, gsb = await asyncio.gather(
-        check_virustotal(url),
+    # ITEM 1: fast_check (WHOIS + cert age) fired in background, capped at 2s.
+    # Never blocks the main pipeline — if it's slow, we just don't get its signal this time.
+    fast_check_task = asyncio.create_task(fast_definitive_check(url))
+
+    # ITEM 2: cancel-token — if VT finds 5+ malicious flags, stop_event fires
+    # and we skip the slow pHash call entirely.
+    stop_event = asyncio.Event()
+
+    vt, page_text, gsb = await asyncio.gather(
+        check_virustotal(url, stop_event),
         fetch_page_text(url),
-        check_phash(url),
         check_google_safe_browsing(url)
     )
+
+    if stop_event.is_set():
+        phash_result = {"is_clone": False, "brand": None, "distance": None}
+    else:
+        phash_result = await check_phash(url)
+
+    try:
+        fast_result = await asyncio.wait_for(fast_check_task, timeout=2.0)
+    except asyncio.TimeoutError:
+        fast_result = {"early_exit": False, "partial_score": 0, "signals": []}
+    except Exception:
+        fast_result = {"early_exit": False, "partial_score": 0, "signals": []}
+
     nlp_prob = nlp_score(page_text)
     typo     = check_typosquatting(url)
     adv      = extract_advanced_features(url)
@@ -397,6 +428,7 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     gsb_boost   = 0.0
     typo_boost  = 0.0
     adv_boost   = 0.0
+    fast_boost  = 0.0
 
     if vt["vt_checked"] and vt["vt_total"] > 0:
         vt_boost = (vt["vt_malicious"] / vt["vt_total"]) * 30
@@ -421,8 +453,14 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
         adv_boost += 15.0
     adv_boost = min(adv_boost, 50.0)
 
-    score   = min(round(ml_score + vt_boost + nlp_boost + phash_boost + gsb_boost + typo_boost + adv_boost, 1), 100.0)
-    signals = get_signals(url, score, vt, nlp_prob, phash_result, gsb, typo, adv)
+    # fast_check contributes a scaled-down boost since it's unreliable (may not have finished in time)
+    fast_boost = fast_result.get("partial_score", 0) * 0.3
+
+    score   = min(round(
+        ml_score + vt_boost + nlp_boost + phash_boost +
+        gsb_boost + typo_boost + adv_boost + fast_boost, 1
+    ), 100.0)
+    signals = get_signals(url, score, vt, nlp_prob, phash_result, gsb, typo, adv, fast_result)
 
     if score >= 70:
         verdict = "BLOCK"
@@ -459,27 +497,30 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
         "signals": signals,
         "cached":  False,
         "details": {
-            "rf_score":      round(rf_prob * 100, 1),
-            "xgb_score":     round(xgb_prob * 100, 1),
-            "vt_malicious":  vt["vt_malicious"],
-            "vt_total":      vt["vt_total"],
-            "vt_boost":      round(vt_boost, 1),
-            "nlp_score":     round(nlp_prob * 100, 1),
-            "nlp_boost":     round(nlp_boost, 1),
-            "phash_clone":   bool(phash_result.get("is_clone", False)),
-            "phash_brand":   phash_result.get("brand"),
-            "phash_boost":   phash_boost,
-            "gsb_match":     gsb.get("gsb_match", False),
-            "gsb_threat":    gsb.get("threat_type"),
-            "gsb_boost":     gsb_boost,
-            "typosquat":     typo.get("is_typosquat", False),
-            "typo_brand":    typo.get("closest_brand"),
-            "typo_boost":    typo_boost,
-            "homoglyph":     bool(adv.get("has_homoglyph", False)),
-            "unicode_spoof": bool(adv.get("has_unicode", False)),
-            "cloud_hosted":  bool(adv.get("is_cloud_hosted", False)),
-            "high_entropy":  bool(adv.get("is_high_entropy", False)),
-            "adv_boost":     adv_boost
+            "rf_score":            round(rf_prob * 100, 1),
+            "xgb_score":           round(xgb_prob * 100, 1),
+            "vt_malicious":        vt["vt_malicious"],
+            "vt_total":            vt["vt_total"],
+            "vt_boost":            round(vt_boost, 1),
+            "nlp_score":           round(nlp_prob * 100, 1),
+            "nlp_boost":           round(nlp_boost, 1),
+            "phash_clone":         bool(phash_result.get("is_clone", False)),
+            "phash_brand":         phash_result.get("brand"),
+            "phash_boost":         phash_boost,
+            "gsb_match":           gsb.get("gsb_match", False),
+            "gsb_threat":          gsb.get("threat_type"),
+            "gsb_boost":           gsb_boost,
+            "typosquat":           typo.get("is_typosquat", False),
+            "typo_brand":          typo.get("closest_brand"),
+            "typo_boost":          typo_boost,
+            "homoglyph":           bool(adv.get("has_homoglyph", False)),
+            "unicode_spoof":       bool(adv.get("has_unicode", False)),
+            "cloud_hosted":        bool(adv.get("is_cloud_hosted", False)),
+            "high_entropy":        bool(adv.get("is_high_entropy", False)),
+            "adv_boost":           adv_boost,
+            "fast_check_used":     bool(fast_result.get("signals")),
+            "fast_boost":          round(fast_boost, 1),
+            "early_exit_triggered": stop_event.is_set()
         }
     }
 
