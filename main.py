@@ -19,13 +19,15 @@ from datetime import datetime
 from extract_advanced_features import extract_advanced_features
 from fast_check import fast_definitive_check
 from runtime_features import get_runtime_domain_features
+from image_scan import run_image_scan
+from dom_check import check_dom_signals
 
 load_dotenv()
 VT_API_KEY  = os.getenv("VT_API_KEY", "")
 GSB_API_KEY = os.getenv("GSB_API_KEY", "")
 REDIS_URL   = os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
 
-app = FastAPI(title="Phishing Detector API v6")
+app = FastAPI(title="Phishing Detector API v8")
 
 @app.on_event("startup")
 def startup():
@@ -106,7 +108,13 @@ class FeedbackRequest(BaseModel):
     feedback: str
 
 def cache_key(url: str) -> str:
-    return f"phish6:url:{hashlib.md5(url.encode()).hexdigest()}"
+    return f"phish8:url:{hashlib.md5(url.encode()).hexdigest()}"
+
+def domain_cache_key(domain: str) -> str:
+    return f"phish8:domain:{hashlib.md5(domain.encode()).hexdigest()}"
+
+def negative_cache_key(url: str) -> str:
+    return f"phish8:neg:{hashlib.md5(url.encode()).hexdigest()}"
 
 def levenshtein(s1: str, s2: str) -> int:
     if len(s1) < len(s2):
@@ -308,9 +316,11 @@ async def check_phash(url: str) -> dict:
         pass
     return {"is_clone": False, "brand": None, "distance": None}
 
-def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None, fast=None) -> list:
+def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None, fast=None, img=None, dom=None) -> list:
     adv  = adv or {}
     fast = fast or {}
+    img  = img or {}
+    dom  = dom or {}
     signals = []
     ext = tldextract.extract(url)
     if ext.suffix and ext.suffix.split(".")[-1] in RISKY_TLDS:
@@ -347,12 +357,22 @@ def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None, fast=None)
         signals.append("Raw IP address embedded in domain/subdomain")
     for s in fast.get("signals", []):
         signals.append(s)
+    if img.get("qr_url_flagged"):
+        signals.append("Suspicious URL embedded in QR code")
+    if img.get("ocr_suspicious"):
+        signals.append("Urgency language detected in page image (OCR)")
+    if img.get("steganography_detected"):
+        signals.append("Possible hidden data in image (steganography)")
+    if dom.get("form_action_mismatch"):
+        signals.append(f"Login form submits to different domain: {dom.get('form_action_domain')}")
+    if dom.get("hidden_iframe_count", 0) > 0:
+        signals.append("Hidden iframe detected on page")
     return signals[:3]
 
 @app.get("/")
 def root():
     return {
-        "status":      "Phishing Detector API v6",
+        "status":      "Phishing Detector API v8",
         "redis":       "connected" if cache else "disabled",
         "vt_enabled":  bool(VT_API_KEY),
         "gsb_enabled": bool(GSB_API_KEY),
@@ -370,9 +390,21 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
         if cached:
             result = json.loads(cached)
             result["cached"] = True
+            result["cache_tier"] = "exact_url"
             return result
     except Exception as e:
         print(f"Cache read error: {e}")
+
+    neg_key = negative_cache_key(url)
+    try:
+        neg_cached = cache.get(neg_key) if cache else None
+        if neg_cached:
+            result = json.loads(neg_cached)
+            result["cached"] = True
+            result["cache_tier"] = "negative"
+            return result
+    except Exception as e:
+        print(f"Negative cache read error: {e}")
 
     ext               = tldextract.extract(url)
     registered_domain = f"{ext.domain}.{ext.suffix}"
@@ -395,7 +427,12 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
                 "fast_check_used": False, "fast_boost": 0.0,
                 "early_exit_triggered": False,
                 "domain_age_days": None,
-                "age_source": None
+                "age_source": None,
+                "qr_flagged": False, "ocr_suspicious": False,
+                "steganography": False, "image_boost": 0.0,
+                "has_login_form": False, "form_action_mismatch": False,
+                "form_action_domain": None, "hidden_iframe_count": 0,
+                "dom_boost": 0.0
             }
         }
         try:
@@ -403,6 +440,20 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
         except:
             pass
         return result
+
+    dom_key = domain_cache_key(registered_domain)
+    try:
+        domain_cached = cache.get(dom_key) if cache else None
+        if domain_cached:
+            domain_result = json.loads(domain_cached)
+            if domain_result.get("verdict") == "BLOCK":
+                result = dict(domain_result)
+                result["url"] = url
+                result["cached"] = True
+                result["cache_tier"] = "domain_level"
+                return result
+    except Exception as e:
+        print(f"Domain cache read error: {e}")
 
     features = extract_features(url)
 
@@ -428,8 +479,14 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
 
     if stop_event.is_set():
         phash_result = {"is_clone": False, "brand": None, "distance": None}
+        image_result = {}
+        dom_result = {}
     else:
-        phash_result = await check_phash(url)
+        phash_result, image_result, dom_result = await asyncio.gather(
+            check_phash(url),
+            run_image_scan(url, stop_event),
+            check_dom_signals(url)
+        )
 
     fast_result = {"early_exit": False, "partial_score": 0, "signals": []}
 
@@ -454,6 +511,26 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     if phash_result.get("is_clone") and phash_result.get("brand"):
         phash_boost = 40.0
 
+    image_boost = 0.0
+    if image_result.get("qr_url_flagged"):
+        image_boost += 25.0
+    if image_result.get("ocr_suspicious"):
+        image_boost += 20.0
+    if image_result.get("steganography_detected"):
+        image_boost += 15.0
+    image_boost = min(image_boost, 40.0)
+
+    dom_boost = 0.0
+    if dom_result.get("has_login_form") and dom_result.get("form_action_mismatch"):
+        dom_boost += 40.0
+    # Hidden iframes alone are very common on legitimate sites (ads, tracking,
+    # payment widgets) — only treat as suspicious when there are MANY of them
+    # (a pattern more consistent with malicious injection) or combined with
+    # a login-form mismatch already flagged above
+    if dom_result.get("hidden_iframe_count", 0) >= 3:
+        dom_boost += 15.0
+    dom_boost = min(dom_boost, 50.0)
+
     if gsb.get("gsb_match"):
         gsb_boost = 40.0
 
@@ -471,15 +548,15 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     adv_boost = min(adv_boost, 50.0)
 
     other_signals_present = (vt_boost > 0 or gsb_boost > 0 or typo_boost > 0 or
-                              adv_boost > 0 or nlp_boost > 0)
+                              adv_boost > 0 or nlp_boost > 0 or image_boost > 0 or dom_boost > 0)
     if not other_signals_present and ml_score < 85:
         ml_score = ml_score * 0.5
 
     score   = min(round(
         ml_score + vt_boost + nlp_boost + phash_boost +
-        gsb_boost + typo_boost + adv_boost, 1
+        gsb_boost + typo_boost + adv_boost + image_boost + dom_boost, 1
     ), 100.0)
-    signals = get_signals(url, score, vt, nlp_prob, phash_result, gsb, typo, adv, fast_result)
+    signals = get_signals(url, score, vt, nlp_prob, phash_result, gsb, typo, adv, fast_result, image_result, dom_result)
 
     if score >= 70:
         verdict = "BLOCK"
@@ -542,12 +619,23 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             "fast_boost":          0.0,
             "early_exit_triggered": stop_event.is_set(),
             "domain_age_days":     features["time_domain_activation"],
-            "age_source":          runtime_feats.get("age_source")
+            "age_source":          runtime_feats.get("age_source"),
+            "qr_flagged":          bool(image_result.get("qr_url_flagged", False)),
+            "ocr_suspicious":      bool(image_result.get("ocr_suspicious", False)),
+            "steganography":       bool(image_result.get("steganography_detected", False)),
+            "image_boost":         image_boost,
+            "has_login_form":      bool(dom_result.get("has_login_form", False)),
+            "form_action_mismatch": bool(dom_result.get("form_action_mismatch", False)),
+            "form_action_domain":  dom_result.get("form_action_domain"),
+            "hidden_iframe_count": dom_result.get("hidden_iframe_count", 0),
+            "dom_boost":           dom_boost
         }
     }
 
     try:
         if cache: cache.set(key, json.dumps(result), ex=ttl)
+        if cache and verdict == "BLOCK":
+            cache.set(dom_key, json.dumps(result), ex=ttl)
     except:
         pass
 
