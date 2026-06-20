@@ -18,13 +18,14 @@ import base64
 from datetime import datetime
 from extract_advanced_features import extract_advanced_features
 from fast_check import fast_definitive_check
+from runtime_features import get_runtime_domain_features
 
 load_dotenv()
 VT_API_KEY  = os.getenv("VT_API_KEY", "")
 GSB_API_KEY = os.getenv("GSB_API_KEY", "")
 REDIS_URL   = os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
 
-app = FastAPI(title="Phishing Detector API v5")
+app = FastAPI(title="Phishing Detector API v6")
 
 @app.on_event("startup")
 def startup():
@@ -53,24 +54,39 @@ except:
     cache = None
     print("Redis not available.")
 
-TRUSTED_DOMAINS = {
-    "github.com","google.com","microsoft.com","apple.com","amazon.com",
-    "facebook.com","twitter.com","instagram.com","linkedin.com","youtube.com",
-    "netflix.com","reddit.com","wikipedia.org","stackoverflow.com",
-    "paypal.com","chase.com","wellsfargo.com","bankofamerica.com",
-    "anthropic.com","openai.com","cloudflare.com","amazonaws.com",
-    "docker.com","render.com","railway.app","vercel.com","netlify.com",
-    "pypi.org","npmjs.com","medium.com","dev.to","gitlab.com",
-    "bitbucket.org","heroku.com","digitalocean.com","stripe.com",
-    "notion.so","figma.com","slack.com","zoom.us","dropbox.com","x.com",
-    "flipkart.com","irctc.co.in","naukri.com","indianexpress.com"
-}
+def load_trusted_domains():
+    domains = {
+        "github.com","google.com","microsoft.com","apple.com","amazon.com",
+        "facebook.com","twitter.com","instagram.com","linkedin.com","youtube.com",
+        "netflix.com","reddit.com","wikipedia.org","stackoverflow.com",
+        "paypal.com","chase.com","wellsfargo.com","bankofamerica.com",
+        "anthropic.com","openai.com","cloudflare.com","amazonaws.com",
+        "docker.com","render.com","railway.app","vercel.com","netlify.com",
+        "pypi.org","npmjs.com","medium.com","dev.to","gitlab.com",
+        "bitbucket.org","heroku.com","digitalocean.com","stripe.com",
+        "notion.so","figma.com","slack.com","zoom.us","dropbox.com","x.com",
+        "flipkart.com","irctc.co.in","naukri.com","indianexpress.com"
+    }
+    try:
+        with open("alexa_top10k.txt", "r") as f:
+            for line in f:
+                d = line.strip().lower()
+                if d:
+                    domains.add(d)
+        print(f"Loaded {len(domains)} trusted domains (including top 10k)")
+    except FileNotFoundError:
+        print("alexa_top10k.txt not found, using hardcoded list only")
+    return domains
+
+TRUSTED_DOMAINS = load_trusted_domains()
 
 CLOUD_SUBDOMAINS = {
     "sites.google.com", "docs.google.com", "drive.google.com",
     "web.app", "firebaseapp.com", "pages.dev", "workers.dev",
     "azurewebsites.net", "github.io", "netlify.app", "vercel.app",
-    "glitch.me", "weebly.com", "wixsite.com", "sharepoint.com"
+    "glitch.me", "weebly.com", "wixsite.com", "sharepoint.com",
+    "googleusercontent.com", "host.secureserver.net", "blogspot.com",
+    "myftpupload.com", "clients.dts.su"
 }
 
 RISKY_TLDS = {"tk","ml","ga","cf","gq","top","xyz","club","online","site",
@@ -90,7 +106,7 @@ class FeedbackRequest(BaseModel):
     feedback: str
 
 def cache_key(url: str) -> str:
-    return f"phish5:url:{hashlib.md5(url.encode()).hexdigest()}"
+    return f"phish6:url:{hashlib.md5(url.encode()).hexdigest()}"
 
 def levenshtein(s1: str, s2: str) -> int:
     if len(s1) < len(s2):
@@ -206,8 +222,6 @@ def nlp_score(text: str) -> float:
         return 0.0
 
 async def check_virustotal(url: str, stop_event: asyncio.Event = None) -> dict:
-    """VT check. If 5+ engines flag malicious, sets stop_event so slower
-    modules (pHash) can be skipped — matches the design's early-exit pattern."""
     if not VT_API_KEY:
         return {"vt_malicious": 0, "vt_total": 0, "vt_checked": False}
     try:
@@ -329,6 +343,8 @@ def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None, fast=None)
         signals.append("Suspicious content hosted on cloud platform")
     if adv.get("is_high_entropy"):
         signals.append("High domain randomness (AI-generated pattern)")
+    if adv.get("has_ip_in_domain"):
+        signals.append("Raw IP address embedded in domain/subdomain")
     for s in fast.get("signals", []):
         signals.append(s)
     return signals[:3]
@@ -336,11 +352,12 @@ def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None, fast=None)
 @app.get("/")
 def root():
     return {
-        "status":      "Phishing Detector API v5",
+        "status":      "Phishing Detector API v6",
         "redis":       "connected" if cache else "disabled",
         "vt_enabled":  bool(VT_API_KEY),
         "gsb_enabled": bool(GSB_API_KEY),
-        "nlp_enabled": NLP_ENABLED
+        "nlp_enabled": NLP_ENABLED,
+        "trusted_domains_loaded": len(TRUSTED_DOMAINS)
     }
 
 @app.post("/check")
@@ -376,7 +393,9 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
                 "homoglyph": False, "unicode_spoof": False,
                 "cloud_hosted": False, "high_entropy": False, "adv_boost": 0.0,
                 "fast_check_used": False, "fast_boost": 0.0,
-                "early_exit_triggered": False
+                "early_exit_triggered": False,
+                "domain_age_days": None,
+                "age_source": None
             }
         }
         try:
@@ -385,18 +404,20 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             pass
         return result
 
-    features       = extract_features(url)
+    features = extract_features(url)
+
+    domain_for_runtime = registered_domain
+    runtime_feats = await get_runtime_domain_features(domain_for_runtime)
+    features["time_domain_activation"] = runtime_feats["time_domain_activation"]
+    features["time_domain_expiration"] = runtime_feats["time_domain_expiration"]
+    features["ttl_hostname"]           = runtime_feats["ttl_hostname"]
+    features["time_response"]          = runtime_feats["time_response"]
+
     feature_values = [[features.get(col, -1) for col in FEATURE_COLS]]
     rf_prob        = float(rf.predict_proba(feature_values)[0][1])
     xgb_prob       = float(xgb.predict_proba(feature_values)[0][1])
     ensemble_prob  = (rf_prob + xgb_prob) / 2
 
-    # ITEM 1: fast_check (WHOIS + cert age) fired in background, capped at 2s.
-    # Never blocks the main pipeline — if it's slow, we just don't get its signal this time.
-    fast_check_task = asyncio.create_task(fast_definitive_check(url))
-
-    # ITEM 2: cancel-token — if VT finds 5+ malicious flags, stop_event fires
-    # and we skip the slow pHash call entirely.
     stop_event = asyncio.Event()
 
     vt, page_text, gsb = await asyncio.gather(
@@ -410,12 +431,7 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     else:
         phash_result = await check_phash(url)
 
-    try:
-        fast_result = await asyncio.wait_for(fast_check_task, timeout=2.0)
-    except asyncio.TimeoutError:
-        fast_result = {"early_exit": False, "partial_score": 0, "signals": []}
-    except Exception:
-        fast_result = {"early_exit": False, "partial_score": 0, "signals": []}
+    fast_result = {"early_exit": False, "partial_score": 0, "signals": []}
 
     nlp_prob = nlp_score(page_text)
     typo     = check_typosquatting(url)
@@ -428,7 +444,6 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     gsb_boost   = 0.0
     typo_boost  = 0.0
     adv_boost   = 0.0
-    fast_boost  = 0.0
 
     if vt["vt_checked"] and vt["vt_total"] > 0:
         vt_boost = (vt["vt_malicious"] / vt["vt_total"]) * 30
@@ -451,14 +466,18 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
         adv_boost += 30.0
     if adv.get("is_high_entropy") or adv.get("is_low_vowel"):
         adv_boost += 15.0
+    if adv.get("has_ip_in_domain"):
+        adv_boost += 35.0
     adv_boost = min(adv_boost, 50.0)
 
-    # fast_check contributes a scaled-down boost since it's unreliable (may not have finished in time)
-    fast_boost = fast_result.get("partial_score", 0) * 0.3
+    other_signals_present = (vt_boost > 0 or gsb_boost > 0 or typo_boost > 0 or
+                              adv_boost > 0 or nlp_boost > 0)
+    if not other_signals_present and ml_score < 85:
+        ml_score = ml_score * 0.5
 
     score   = min(round(
         ml_score + vt_boost + nlp_boost + phash_boost +
-        gsb_boost + typo_boost + adv_boost + fast_boost, 1
+        gsb_boost + typo_boost + adv_boost, 1
     ), 100.0)
     signals = get_signals(url, score, vt, nlp_prob, phash_result, gsb, typo, adv, fast_result)
 
@@ -517,10 +536,13 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             "unicode_spoof":       bool(adv.get("has_unicode", False)),
             "cloud_hosted":        bool(adv.get("is_cloud_hosted", False)),
             "high_entropy":        bool(adv.get("is_high_entropy", False)),
+            "has_ip_in_domain":    bool(adv.get("has_ip_in_domain", False)),
             "adv_boost":           adv_boost,
-            "fast_check_used":     bool(fast_result.get("signals")),
-            "fast_boost":          round(fast_boost, 1),
-            "early_exit_triggered": stop_event.is_set()
+            "fast_check_used":     False,
+            "fast_boost":          0.0,
+            "early_exit_triggered": stop_event.is_set(),
+            "domain_age_days":     features["time_domain_activation"],
+            "age_source":          runtime_feats.get("age_source")
         }
     }
 

@@ -18,7 +18,9 @@ CLOUD_PROVIDERS = [
     "sites.google.com","web.app","firebaseapp.com","pages.dev",
     "workers.dev","azurewebsites.net","github.io","netlify.app",
     "vercel.app","glitch.me","weebly.com","wixsite.com",
-    "sharepoint.com","blob.core.windows.net","s3.amazonaws.com"
+    "sharepoint.com","blob.core.windows.net","s3.amazonaws.com",
+    "googleusercontent.com","host.secureserver.net","blogspot.com",
+    "myftpupload.com"
 ]
 
 RISKY_TLDS = {"tk","ml","ga","cf","gq","top","xyz","club","online",
@@ -79,7 +81,8 @@ def extract_advanced_features(url):
             for p in CLOUD_PROVIDERS
         )
         cloud_suspicious = is_cloud and any(w in url_lower for w in [
-            "login","verify","secure","account","banking","password"
+            "login","verify","secure","account","banking","password",
+            "signup","activate","update","confirm"
         ])
 
         # 4. Domain entropy
@@ -111,15 +114,19 @@ def extract_advanced_features(url):
         # 10. Double extension pattern
         double_ext = domain.count('.') > 0
 
-        # 11. IP address as domain
-        has_ip = bool(re.match(r'^\d+\.\d+\.\d+\.\d+$', ext.domain))
+        # 11. IP address as domain OR embedded as subdomain
+        # (e.g. 151.248.71.198.host.secureserver.net is a common phishing
+        # pattern that hides a raw IP inside a legitimate-looking subdomain)
+        has_ip_domain    = bool(re.match(r'^\d+\.\d+\.\d+\.\d+$', ext.domain))
+        has_ip_subdomain = bool(re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', subdomain))
+        has_ip = has_ip_domain or has_ip_subdomain
 
         # 12. Suspicious keyword density
         suspicious_words = ["login","verify","secure","account","update",
                           "confirm","banking","password","credential",
                           "suspended","unlock","reactivate","billing",
                           "paypal","apple","microsoft","amazon","google",
-                          "facebook","netflix","instagram"]
+                          "facebook","netflix","instagram","signup","activate"]
         keyword_count = sum(1 for w in suspicious_words if w in url_lower)
 
         return {
@@ -160,14 +167,15 @@ if __name__ == "__main__":
         "https://sites.google.com/view/paypal-login/home",
         "https://www.google.com",
         "http://secure-hdfc-bank-login.xyz/verify",
-        "http://аpple.com/login",   # Cyrillic 'а'
-        "http://gооgle.com/login",  # Cyrillic 'о' x2
+        "http://аpple.com/login",
+        "http://gооgle.com/login",
+        "http://151.248.71.198.host.secureserver.net/signups/activate/x",
     ]
 
     for url in test_urls:
         f = extract_advanced_features(url)
-        print(f"\n{url[:60]}")
+        print(f"\n{url[:70]}")
         print(f"  homoglyph={f.get('has_homoglyph')} unicode={f.get('has_unicode')} "
               f"brand_dist={f.get('min_brand_dist')} entropy={f.get('domain_entropy')} "
               f"cloud={f.get('is_cloud_hosted')} cloud_susp={f.get('cloud_suspicious')} "
-              f"keywords={f.get('keyword_count')}")
+              f"has_ip={f.get('has_ip_in_domain')} keywords={f.get('keyword_count')}")
