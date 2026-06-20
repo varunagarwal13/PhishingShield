@@ -8,8 +8,14 @@ from PIL import Image
 
 log = logging.getLogger("phishing_shield")
 
+import platform
 import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+if platform.system() == "Windows":
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# On Linux (Render/Docker), tesseract is installed via apt-get and is
+# already on PATH, so no override is needed
+
 OCR_ENABLED = True
 
 try:

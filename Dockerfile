@@ -2,16 +2,20 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install dependencies
+# Install system dependencies needed for WHOIS, DNS, Pillow/numpy, and OCR
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy app files
-COPY main.py .
-COPY database.py .
-COPY model_rf_v2.pkl .
-COPY model_xgb_v2.pkl .
-COPY feature_cols_v2.pkl .
+# Copy all application files (models, modules, data files) in one step
+# instead of listing each one — prevents new files from being silently
+# excluded from the deployed image
+COPY . .
 
 EXPOSE 8000
 

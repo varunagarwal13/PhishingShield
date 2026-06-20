@@ -1,0 +1,7 @@
+﻿__pycache__/
+*.pyc
+*.db
+.env
+brand_screenshots/
+.git/
+.gitignore
