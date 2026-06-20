@@ -10,7 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy all application files (models, modules, data files) in one step
 # instead of listing each one — prevents new files from being silently

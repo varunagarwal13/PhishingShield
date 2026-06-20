@@ -9,7 +9,6 @@ xgboost
 tldextract
 sqlalchemy
 psycopg2-binary
-pyarrow
 pydantic==2.13.4
 beautifulsoup4
 python-whois
