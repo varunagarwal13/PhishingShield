@@ -6,6 +6,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     tesseract-ocr \
+    libzbar0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
