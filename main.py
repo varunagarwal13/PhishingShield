@@ -656,6 +656,19 @@ def submit_feedback(request: FeedbackRequest, db: Session = Depends(get_db)):
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
+@app.get("/feedback-logs")
+def get_feedback_logs(limit: int = 50, db: Session = Depends(get_db)):
+    logs = db.query(FeedbackLog).order_by(FeedbackLog.timestamp.desc()).limit(limit).all()
+    return [
+        {
+            "id":        l.id,
+            "url":       l.url,
+            "feedback":  l.feedback,
+            "timestamp": str(l.timestamp)
+        }
+        for l in logs
+    ]
+
 @app.get("/logs")
 def get_logs(limit: int = 50, db: Session = Depends(get_db)):
     logs = db.query(ThreatLog).order_by(ThreatLog.timestamp.desc()).limit(limit).all()
