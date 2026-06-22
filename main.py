@@ -83,12 +83,25 @@ def load_trusted_domains():
 TRUSTED_DOMAINS = load_trusted_domains()
 
 CLOUD_SUBDOMAINS = {
+    # Google
     "sites.google.com", "docs.google.com", "drive.google.com",
+    "googleusercontent.com",
+    # Firebase/Cloudflare
     "web.app", "firebaseapp.com", "pages.dev", "workers.dev",
-    "azurewebsites.net", "github.io", "netlify.app", "vercel.app",
-    "glitch.me", "weebly.com", "wixsite.com", "sharepoint.com",
-    "googleusercontent.com", "host.secureserver.net", "blogspot.com",
-    "myftpupload.com", "clients.dts.su"
+    # GitHub
+    "github.io",
+    # Netlify/Vercel
+    "netlify.app", "vercel.app",
+    # Framer/Webflow/Glitch
+    "framer.app", "webflow.io", "glitch.me",
+    # Website builders
+    "weebly.com", "wixsite.com", "godaddysites.com",
+    "squarespace.com", "cargo.site", "typedream.app",
+    # Hosting
+    "sharepoint.com", "host.secureserver.net",
+    "myftpupload.com", "clients.dts.su",
+    # Blogging platforms
+    "blogspot.com", "wordpress.com",
 }
 
 RISKY_TLDS = {"tk","ml","ga","cf","gq","top","xyz","club","online","site",

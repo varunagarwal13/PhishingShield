@@ -17,10 +17,12 @@ BRANDS = ["paypal","google","amazon","facebook","netflix",
 CLOUD_PROVIDERS = [
     "sites.google.com","web.app","firebaseapp.com","pages.dev",
     "workers.dev","azurewebsites.net","github.io","netlify.app",
-    "vercel.app","glitch.me","weebly.com","wixsite.com",
-    "sharepoint.com","blob.core.windows.net","s3.amazonaws.com",
+    "vercel.app","framer.app","webflow.io","glitch.me",
+    "weebly.com","wixsite.com","godaddysites.com","squarespace.com",
+    "cargo.site","typedream.app","sharepoint.com",
+    "blob.core.windows.net","s3.amazonaws.com",
     "googleusercontent.com","host.secureserver.net","blogspot.com",
-    "myftpupload.com"
+    "wordpress.com","myftpupload.com"
 ]
 
 RISKY_TLDS = {"tk","ml","ga","cf","gq","top","xyz","club","online",
