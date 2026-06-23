@@ -82,10 +82,25 @@ def extract_advanced_features(url):
             full_domain.endswith(p) or f"{subdomain}.{full_domain}".endswith(p)
             for p in CLOUD_PROVIDERS
         )
-        cloud_suspicious = is_cloud and any(w in url_lower for w in [
+        # Cloud-hosted is suspicious if it has phishing keywords OR
+        # the subdomain itself looks like brand impersonation or random generation
+        has_cloud_keywords = any(w in url_lower for w in [
             "login","verify","secure","account","banking","password",
-            "signup","activate","update","confirm"
+            "signup","activate","update","confirm","paypal","apple",
+            "microsoft","amazon","google","facebook","netflix","bank",
+            "wallet","ledger","trezor","metamask","coinbase"
         ])
+        # Random-looking subdomains (long alphanumeric IDs) are also suspicious
+        # e.g. "expanded-candidate-299136.framer.app" or "trezorawlalet.webflow.io"
+        subdomain_looks_random = len(subdomain) > 8 and (
+            any(c.isdigit() for c in subdomain) or
+            subdomain.count('-') >= 2 or
+            any(b in subdomain for b in ["paypal","apple","microsoft","amazon",
+                                          "google","facebook","netflix","bank",
+                                          "wallet","ledger","trezor","metamask",
+                                          "coinbase","secure","verify","login"])
+        )
+        cloud_suspicious = is_cloud and (has_cloud_keywords or subdomain_looks_random)
 
         # 4. Domain entropy
         entropy = shannon_entropy(domain)
