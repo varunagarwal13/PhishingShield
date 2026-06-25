@@ -1,7 +1,38 @@
-.env
+# Python
 __pycache__/
+*.py[cod]
+*.pyo
+.env
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Fix #5: ML model artefacts — store in object storage or DVC, not git
+# These files are large binaries; committing them bloats history and leaks model weights.
+*.pkl
+*.pickle
+*.joblib
+
+# Database
 *.db
-vrbancic.csv
-model_rf.pkl
-model_xgb.pkl
-*.pyc
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Docker
+.dockerignore
+
+# Archives
+*.zip
