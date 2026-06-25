@@ -29,6 +29,14 @@ PROFILES = {
         "unknown_random": 150,
         "title": "2,000 URL Daily-Heavy Benchmark Report",
     },
+    "daily_5000": {
+        "total": 5000,
+        "daily_usage": 5000,
+        "legitimate_sensitive": 0,
+        "synthetic_phishing": 0,
+        "unknown_random": 0,
+        "title": "5,000 Daily-Used URL Benchmark Report",
+    },
 }
 
 ROOT = Path(__file__).resolve().parent
