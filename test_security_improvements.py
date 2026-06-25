@@ -198,6 +198,32 @@ class SecurityImprovementTests(unittest.TestCase):
         self.assertTrue(similarity["suspicious"])
         self.assertEqual(similarity["brand"], "amazon")
 
+    def test_cloud_hosted_brand_lure_skips_high_confidence_fast_allow(self):
+        host = main.hostname_from_url("https://sites.google.com/view/paypal-login/home")
+        match, source = main.high_confidence_allow_match(host)
+
+        self.assertIsNotNone(match)
+        self.assertTrue(
+            main.should_skip_high_confidence_allow(
+                "https://sites.google.com/view/paypal-login/home",
+                host,
+                source,
+            )
+        )
+
+    def test_official_trusted_login_does_not_skip_fast_allow(self):
+        host = main.hostname_from_url("https://www.paypal.com/signin")
+        match, source = main.high_confidence_allow_match(host)
+
+        self.assertIsNotNone(match)
+        self.assertFalse(
+            main.should_skip_high_confidence_allow(
+                "https://www.paypal.com/signin",
+                host,
+                source,
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

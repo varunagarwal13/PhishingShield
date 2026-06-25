@@ -249,6 +249,21 @@ def high_confidence_allow_match(hostname: str) -> tuple[str | None, str | None]:
         return top_match, "top_ranked_domain"
     return None, None
 
+def should_skip_high_confidence_allow(url: str, hostname: str,
+                                      allow_source: str | None) -> bool:
+    if not allow_source:
+        return True
+    if trust_match_for_hostname(hostname) and not is_cloud_hostname(hostname):
+        return False
+    url_lower = normalize_url(url).lower()
+    brand_lure = any(brand in url_lower for brand in BRAND_NAMES_LEV)
+    credential_lure = any(term in url_lower for term in SUSPICIOUS_URL_TERMS)
+    if is_cloud_hostname(hostname) and (brand_lure or credential_lure):
+        return True
+    if allow_source == "top_ranked_domain" and brand_lure and credential_lure:
+        return True
+    return False
+
 def verdict_for_score(score: float) -> tuple[str, int]:
     if score >= 90:
         return "BLOCK", 86400
@@ -857,7 +872,8 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
         print(f"Domain cache read error: {e}")
 
     allow_match, allow_source = high_confidence_allow_match(hostname)
-    if allow_match and urlparse(url).scheme == "https":
+    if (allow_match and urlparse(url).scheme == "https" and
+            not should_skip_high_confidence_allow(url, hostname, allow_source)):
         stop_event = asyncio.Event()
         vt, gsb = await asyncio.gather(
             check_virustotal(url, stop_event),

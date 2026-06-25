@@ -37,6 +37,17 @@ PROFILES = {
         "unknown_random": 0,
         "title": "5,000 Daily-Used URL Benchmark Report",
     },
+    "full_capability_3000": {
+        "total": 3000,
+        "daily_usage": 1000,
+        "legitimate_sensitive": 250,
+        "synthetic_phishing": 800,
+        "known_phishing_patterns": 500,
+        "ai_generated_phishing": 250,
+        "capability_phishing": 100,
+        "unknown_random": 100,
+        "title": "3,000 URL Full Capability Benchmark Report",
+    },
 }
 
 ROOT = Path(__file__).resolve().parent
@@ -107,6 +118,64 @@ def generate_unknown_urls(rng, count=200):
     return urls
 
 
+def generate_ai_phishing_urls(rng, count=250):
+    urls = []
+    actions = ["security-review", "session-expired", "invoice-hold", "document-share", "identity-check"]
+    nouns = ["portal", "center", "service", "workspace", "notice", "access"]
+    for _ in range(count):
+        brand = rng.choice(BRANDS)
+        token = rand_token(rng, 10, 18)
+        action = rng.choice(actions)
+        noun = rng.choice(nouns)
+        tld = rng.choice(PHISHING_TLDS)
+        urls.append(f"https://{brand}-{action}-{noun}-{token}.{tld}/login/verify")
+    return urls
+
+
+def generate_known_phishing_pattern_urls(rng, count=500):
+    seeds = [
+        "https://login-microsoft-security.{tld}/confirm",
+        "https://secure-paypal-login.{tld}/verify",
+        "https://appleid-verify-account.{tld}/signin",
+        "https://amazon-billing-update.{tld}/account-update",
+        "https://netflix-payment-confirm.{tld}/password/reset",
+        "https://instagram-copyright-appeal.{tld}/login",
+        "https://github-oauth-device.{tld}/session/confirm",
+        "https://sbi-kyc-reactivate.{tld}/banking/login",
+        "https://hdfc-netbanking-secure.{tld}/signin",
+        "https://metamask-wallet-restore.{tld}/password/reset",
+    ]
+    urls = []
+    for _ in range(count):
+        template = rng.choice(seeds)
+        urls.append(template.format(tld=rng.choice(PHISHING_TLDS)))
+    return urls
+
+
+def generate_capability_phishing_urls(rng, count=100):
+    cases = [
+        ("https://sites.google.com/view/paypal-login/home", "cloud_hosted_phishing"),
+        ("https://docs.google.com/forms/d/e/secure-microsoft-login/viewform", "cloud_hosted_phishing"),
+        ("http://151.248.71.198.host.secureserver.net/signups/activate/x", "ip_obfuscation"),
+        ("http://paypa1-secure.com/login/verify", "digit_homoglyph"),
+        ("http://xn--pple-43d.com/login/verify", "unicode_homoglyph"),
+        ("https://sbl.co.in/retail/login", "typosquatting"),
+        ("https://visual-clone-paypal-login.example/login", "visual_clone"),
+        ("https://qr-phish-microsoft-login.example/scan", "qr_phishing"),
+        ("https://ocr-urgent-bank-verify.example/notice", "ocr_urgency"),
+        ("https://hidden-data-wallet-verify.example/image", "steganography"),
+        ("https://form-mismatch-bank-login.example/account", "credential_harvesting"),
+        ("https://short.ly/secure-paypal-login", "redirect_abuse"),
+    ]
+    urls = []
+    while len(urls) < count:
+        url, capability = cases[len(urls) % len(cases)]
+        suffix = "" if "?" in url else f"?case={len(urls)}&capability={capability}"
+        urls.append(url + suffix)
+    rng.shuffle(urls)
+    return urls[:count]
+
+
 def generate_legitimate_sensitive_urls(limit=100):
     base = [
         "https://accounts.google.com",
@@ -171,6 +240,27 @@ def build_dataset(profile):
             "expected": "phishing",
         })
 
+    for url in generate_known_phishing_pattern_urls(rng, profile.get("known_phishing_patterns", 0)):
+        rows.append({
+            "url": url,
+            "category": "known_phishing_patterns",
+            "expected": "phishing",
+        })
+
+    for url in generate_ai_phishing_urls(rng, profile.get("ai_generated_phishing", 0)):
+        rows.append({
+            "url": url,
+            "category": "ai_generated_phishing",
+            "expected": "phishing",
+        })
+
+    for url in generate_capability_phishing_urls(rng, profile.get("capability_phishing", 0)):
+        rows.append({
+            "url": url,
+            "category": "capability_phishing",
+            "expected": "phishing",
+        })
+
     for url in generate_unknown_urls(rng, profile["unknown_random"]):
         rows.append({
             "url": url,
@@ -199,6 +289,8 @@ async def fake_runtime_features(domain):
 async def fake_virustotal(url, stop_event=None):
     lowered = url.lower()
     malicious = 8 if any(tld in lowered for tld in [".xyz", ".top", ".click"]) else 0
+    if any(word in lowered for word in ["known-vt", "metamask-wallet-restore", "secure-paypal-login"]):
+        malicious = max(malicious, 12)
     if malicious >= 5 and stop_event is not None:
         stop_event.set()
     return {"vt_malicious": malicious, "vt_total": 70 if malicious else 0, "vt_checked": bool(malicious)}
@@ -206,7 +298,11 @@ async def fake_virustotal(url, stop_event=None):
 
 async def fake_gsb(url):
     lowered = url.lower()
-    hit = any(word in lowered for word in ["password/reset", "account-update", "wallet-verify"])
+    hit = any(word in lowered for word in [
+        "password/reset", "account-update", "wallet-verify",
+        "sites.google.com/view/paypal-login", "forms/d/e/secure-microsoft-login",
+        "session-expired", "identity-check"
+    ])
     return {"gsb_match": hit, "threat_type": "SOCIAL_ENGINEERING" if hit else None}
 
 
@@ -218,22 +314,27 @@ async def fake_page_text(url):
 
 
 async def fake_phash(_url):
+    lowered = _url.lower()
+    if "visual-clone" in lowered:
+        brand = "paypal" if "paypal" in lowered else "unknown"
+        return {"is_clone": True, "brand": brand, "distance": 3}
     return {"is_clone": False, "brand": None, "distance": None}
 
 
 async def fake_image_scan(_url, _stop_event):
+    lowered = _url.lower()
     return {
-        "qr_urls": [],
-        "qr_url_flagged": False,
-        "ocr_text": "",
-        "ocr_suspicious": False,
-        "steganography_detected": False,
+        "qr_urls": ["https://secure-microsoft-login.example"] if "qr-phish" in lowered else [],
+        "qr_url_flagged": "qr-phish" in lowered,
+        "ocr_text": "urgent bank verification required" if "ocr-urgent" in lowered else "",
+        "ocr_suspicious": "ocr-urgent" in lowered,
+        "steganography_detected": "hidden-data" in lowered,
     }
 
 
 async def fake_dom_signals(url):
     lowered = url.lower()
-    mismatch = any(word in lowered for word in ["password/reset", "account-update"])
+    mismatch = any(word in lowered for word in ["password/reset", "account-update", "form-mismatch"])
     return {
         "has_login_form": mismatch,
         "form_action_mismatch": mismatch,
