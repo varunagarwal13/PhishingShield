@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import joblib
@@ -9,6 +9,9 @@ import asyncio
 import tldextract
 import redis
 import aiohttp
+import socket
+import ssl
+import time
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from database import init_db, get_db, ThreatLog, FeedbackLog
@@ -21,6 +24,9 @@ from fast_check import fast_definitive_check
 from runtime_features import get_runtime_domain_features
 from image_scan import run_image_scan
 from dom_check import check_dom_signals
+from feature_store import DomainFeatureStore
+from model_registry import ModelRegistry
+from observability import MetricsCollector
 
 load_dotenv()
 VT_API_KEY  = os.getenv("VT_API_KEY", "")
@@ -28,25 +34,20 @@ GSB_API_KEY = os.getenv("GSB_API_KEY", "")
 REDIS_URL   = os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
 
 app = FastAPI(title="Phishing Detector API v8")
+TLD_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None)
+metrics = MetricsCollector()
 
 @app.on_event("startup")
 def startup():
     init_db()
 
 print("Loading models...")
-rf           = joblib.load("model_rf_v2.pkl")
-xgb          = joblib.load("model_xgb_v2.pkl")
-FEATURE_COLS = joblib.load("feature_cols_v2.pkl")
-print(f"ML models loaded. Features: {len(FEATURE_COLS)}")
+model_registry = ModelRegistry()
+rf, xgb, FEATURE_COLS = model_registry.load_core_models()
+print(f"ML models loaded. Version: {model_registry.active_version}. Features: {len(FEATURE_COLS)}")
 
-try:
-    nlp_vectorizer = joblib.load("nlp_vectorizer.pkl")
-    nlp_clf        = joblib.load("nlp_model.pkl")
-    NLP_ENABLED    = True
-    print("NLP model loaded.")
-except:
-    NLP_ENABLED = False
-    print("NLP model not found.")
+nlp_vectorizer, nlp_clf, NLP_ENABLED = model_registry.load_nlp_models()
+print("NLP model loaded." if NLP_ENABLED else "NLP model not found.")
 
 try:
     cache = redis.from_url(REDIS_URL, decode_responses=True)
@@ -55,6 +56,8 @@ try:
 except:
     cache = None
     print("Redis not available.")
+
+feature_store = DomainFeatureStore(cache)
 
 def load_trusted_domains():
     domains = {
@@ -67,17 +70,12 @@ def load_trusted_domains():
         "pypi.org","npmjs.com","medium.com","dev.to","gitlab.com",
         "bitbucket.org","heroku.com","digitalocean.com","stripe.com",
         "notion.so","figma.com","slack.com","zoom.us","dropbox.com","x.com",
-        "flipkart.com","irctc.co.in","naukri.com","indianexpress.com"
+        "flipkart.com","irctc.co.in","naukri.com","indianexpress.com",
+        "sbi.bank.in","onlinesbi.sbi.bank.in","retail.sbi.bank.in",
+        "hdfcbank.com","icicibank.com","axisbank.com","kotak.com",
+        "paytm.com","microsoftonline.com"
     }
-    try:
-        with open("alexa_top10k.txt", "r") as f:
-            for line in f:
-                d = line.strip().lower()
-                if d:
-                    domains.add(d)
-        print(f"Loaded {len(domains)} trusted domains (including top 10k)")
-    except FileNotFoundError:
-        print("alexa_top10k.txt not found, using hardcoded list only")
+    print(f"Loaded {len(domains)} curated trusted domains")
     return domains
 
 TRUSTED_DOMAINS = load_trusted_domains()
@@ -113,6 +111,12 @@ BRAND_NAMES_LEV = [
     "chase","wellsfargo","bankofamerica","dropbox","github","steam"
 ]
 
+SUSPICIOUS_URL_TERMS = {
+    "login", "verify", "secure", "account", "update", "confirm", "banking",
+    "password", "credential", "suspended", "unlock", "reactivate", "billing",
+    "signin", "wallet", "validate", "kyc"
+}
+
 class URLRequest(BaseModel):
     url: str
 
@@ -129,6 +133,195 @@ def domain_cache_key(domain: str) -> str:
 def negative_cache_key(url: str) -> str:
     return f"phish8:neg:{hashlib.md5(url.encode()).hexdigest()}"
 
+def normalize_url(url: str) -> str:
+    url = url.strip()
+    if not re.match(r"^[a-z][a-z0-9+.-]*://", url, re.I):
+        return f"https://{url}"
+    return url
+
+def hostname_from_url(url: str) -> str:
+    parsed = urlparse(normalize_url(url))
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if hostname.startswith("www."):
+        hostname = hostname[4:]
+    return hostname
+
+def registered_domain_from_host(hostname: str) -> str:
+    ext = TLD_EXTRACTOR(hostname)
+    if not ext.suffix:
+        return ext.domain.lower()
+    return f"{ext.domain}.{ext.suffix}".lower()
+
+def host_matches_domain(hostname: str, trusted_domain: str) -> bool:
+    hostname = hostname.lower().rstrip(".")
+    trusted_domain = trusted_domain.lower().rstrip(".")
+    return hostname == trusted_domain or hostname.endswith(f".{trusted_domain}")
+
+def trust_match_for_hostname(hostname: str) -> str | None:
+    hostname = hostname.lower().rstrip(".")
+    hostname_registered_domain = registered_domain_from_host(hostname)
+    for trusted_domain in sorted(TRUSTED_DOMAINS, key=len, reverse=True):
+        trusted_domain = trusted_domain.lower().rstrip(".")
+        if (host_matches_domain(hostname, trusted_domain) and
+                hostname_registered_domain == registered_domain_from_host(trusted_domain)):
+            return trusted_domain
+    return None
+
+def is_trusted_hostname(hostname: str) -> bool:
+    return trust_match_for_hostname(hostname) is not None
+
+def is_cloud_hostname(hostname: str) -> bool:
+    return any(host_matches_domain(hostname, cloud_domain) for cloud_domain in CLOUD_SUBDOMAINS)
+
+def verdict_for_score(score: float) -> tuple[str, int]:
+    if score >= 90:
+        return "BLOCK", 86400
+    if score >= 70:
+        return "WARN", 3600
+    if score >= 40:
+        return "MONITOR", 3600
+    return "ALLOW", 3600
+
+def clamp_score(score: float) -> float:
+    return min(max(round(score, 1), 0.0), 100.0)
+
+def calibrate_ml_score(ml_score: float, has_positive_rules: bool) -> float:
+    if not has_positive_rules and ml_score < 85:
+        return ml_score * 0.5
+    return ml_score
+
+def has_trust_conflict(vt, gsb, typo, adv, phash, dom, image,
+                       domain_similarity=None, attack_patterns=None) -> bool:
+    domain_similarity = domain_similarity or {}
+    attack_patterns = attack_patterns or {}
+    return (
+        (vt.get("vt_checked") and vt.get("vt_malicious", 0) > 0) or
+        bool(gsb.get("gsb_match")) or
+        bool(typo.get("is_typosquat")) or
+        bool(domain_similarity.get("suspicious")) or
+        bool(attack_patterns.get("patterns")) or
+        bool(phash.get("is_clone") and phash.get("brand")) or
+        bool(adv.get("has_homoglyph")) or
+        bool(adv.get("is_cloud_hosted") and adv.get("cloud_suspicious")) or
+        bool(adv.get("has_ip_in_domain")) or
+        bool(image.get("qr_url_flagged")) or
+        bool(dom.get("has_login_form") and dom.get("form_action_mismatch"))
+    )
+
+async def validate_tls_certificate(hostname: str) -> dict:
+    if not hostname:
+        return {"checked": False, "valid": False, "issuer": None, "error": "missing hostname"}
+    loop = asyncio.get_event_loop()
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, _validate_tls_certificate, hostname), timeout=4.0
+        )
+    except Exception as e:
+        return {"checked": False, "valid": False, "issuer": None, "error": str(e)}
+
+def _validate_tls_certificate(hostname: str) -> dict:
+    ctx = ssl.create_default_context()
+    with socket.create_connection((hostname, 443), timeout=3) as sock:
+        with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
+            cert = ssock.getpeercert()
+    issuer = None
+    issuer_parts = cert.get("issuer", ())
+    for group in issuer_parts:
+        for key, value in group:
+            if key == "organizationName":
+                issuer = value
+                break
+        if issuer:
+            break
+    return {"checked": True, "valid": True, "issuer": issuer, "error": None}
+
+def trusted_domain_delta(
+    hostname: str,
+    has_conflict: bool,
+    tls_validation: dict | None = None,
+    scheme: str = "https",
+) -> tuple[float, str | None]:
+    trusted_match = trust_match_for_hostname(hostname)
+    if not trusted_match or has_conflict or scheme != "https":
+        return 0.0, trusted_match
+    if tls_validation and tls_validation.get("valid"):
+        return -25.0, trusted_match
+    return -10.0, trusted_match
+
+def arbitrate_score(ml_score: float, positive_rule_score: float, trust_delta: float) -> float:
+    return clamp_score(ml_score + positive_rule_score + trust_delta)
+
+def bound_positive_rule_score(score: float) -> float:
+    return min(round(score, 1), 75.0)
+
+def diagnose_lexical_feature_risk(url: str, features: dict, adv: dict) -> dict:
+    url_lower = normalize_url(url).lower()
+    keyword_hits = sorted(term for term in SUSPICIOUS_URL_TERMS if term in url_lower)
+    risky = []
+
+    if keyword_hits:
+        risky.append("suspicious_keywords")
+    if adv.get("subdomain_depth", 0) >= 3:
+        risky.append("deep_subdomain")
+    if features.get("length_url", 0) >= 90:
+        risky.append("long_url")
+    if features.get("domain_length", 0) >= 28:
+        risky.append("long_domain")
+    if features.get("qty_hyphen_domain", 0) >= 2:
+        risky.append("many_domain_hyphens")
+    if adv.get("keyword_count", 0) >= 2:
+        risky.append("keyword_density")
+
+    return {
+        "keyword_hits": keyword_hits,
+        "subdomain_depth": adv.get("subdomain_depth", 0),
+        "url_length": features.get("length_url", 0),
+        "domain_length": features.get("domain_length", 0),
+        "domain_hyphens": features.get("qty_hyphen_domain", 0),
+        "keyword_count": adv.get("keyword_count", 0),
+        "risk_features": risky,
+    }
+
+def classify_attack_pattern(url: str, features: dict, adv: dict, typo: dict,
+                            domain_similarity: dict, dom: dict, phash: dict) -> dict:
+    patterns = []
+
+    if domain_similarity.get("suspicious") or typo.get("is_typosquat") or adv.get("has_homoglyph"):
+        patterns.append("brand_impersonation")
+    if adv.get("has_unicode") or adv.get("has_homoglyph"):
+        patterns.append("homoglyph_spoofing")
+    if adv.get("is_cloud_hosted") and adv.get("cloud_suspicious"):
+        patterns.append("cloud_hosted_phishing")
+    if adv.get("has_ip_in_domain"):
+        patterns.append("ip_obfuscation")
+    if dom.get("has_login_form") and dom.get("form_action_mismatch"):
+        patterns.append("credential_harvesting")
+    if phash.get("is_clone") and phash.get("brand"):
+        patterns.append("visual_brand_clone")
+
+    url_lower = normalize_url(url).lower()
+    credential_terms = {"login", "signin", "password", "credential", "account"}
+    verification_terms = {"verify", "confirm", "update", "secure", "unlock", "reactivate", "kyc"}
+    if any(t in url_lower for t in credential_terms) and any(t in url_lower for t in verification_terms):
+        patterns.append("credential_lure_url")
+
+    if features.get("qty_redirects", 0) >= 2 or features.get("url_shortened", 0):
+        patterns.append("redirect_abuse")
+
+    unique_patterns = sorted(set(patterns))
+    score = min(len(unique_patterns) * 12.0, 35.0)
+    severe = any(p in unique_patterns for p in [
+        "credential_harvesting", "visual_brand_clone", "brand_impersonation", "homoglyph_spoofing"
+    ])
+    if severe:
+        score = max(score, 20.0)
+
+    return {
+        "patterns": unique_patterns,
+        "score": score,
+        "classifier": "deterministic_attack_pattern_v1",
+    }
+
 def levenshtein(s1: str, s2: str) -> int:
     if len(s1) < len(s2):
         return levenshtein(s2, s1)
@@ -142,10 +335,80 @@ def levenshtein(s1: str, s2: str) -> int:
         prev = curr
     return prev[-1]
 
+def normalize_brand_text(value: str) -> str:
+    replacements = {
+        "0": "o", "1": "l", "3": "e", "4": "a", "5": "s",
+        "6": "g", "7": "t", "8": "b", "@": "a", "!": "i",
+    }
+    normalized = value.lower()
+    for fake, real in replacements.items():
+        normalized = normalized.replace(fake, real)
+    return re.sub(r"[^a-z0-9]", "", normalized)
+
+def char_ngrams(value: str, size: int = 2) -> set[str]:
+    if len(value) <= size:
+        return {value}
+    return {value[i:i + size] for i in range(len(value) - size + 1)}
+
+def ngram_similarity(left: str, right: str) -> float:
+    left_grams = char_ngrams(left)
+    right_grams = char_ngrams(right)
+    if not left_grams or not right_grams:
+        return 0.0
+    return len(left_grams & right_grams) / len(left_grams | right_grams)
+
+def domain_similarity_check(url: str) -> dict:
+    ext = TLD_EXTRACTOR(normalize_url(url))
+    hostname = hostname_from_url(url)
+    domain = ext.domain.lower()
+    normalized_domain = normalize_brand_text(domain)
+    trusted_match = trust_match_for_hostname(hostname)
+
+    best = {
+        "suspicious": False,
+        "brand": None,
+        "reason": None,
+        "distance": 99,
+        "similarity": 0.0,
+        "boost": 0.0,
+    }
+    if trusted_match or len(normalized_domain) < 3:
+        return best
+
+    domain_tokens = [t for t in re.split(r"[^a-z0-9]+", domain) if t]
+    for brand in BRAND_NAMES_LEV:
+        normalized_brand = normalize_brand_text(brand)
+        distance = levenshtein(normalized_domain, normalized_brand)
+        similarity = ngram_similarity(normalized_domain, normalized_brand)
+        reason = None
+
+        if brand in domain_tokens or brand in normalized_domain:
+            reason = "brand term in untrusted domain"
+        elif distance <= 1:
+            reason = "near brand edit distance"
+        elif len(normalized_brand) >= 5 and distance <= 2 and similarity >= 0.45:
+            reason = "brand lookalike edit distance"
+        elif similarity >= 0.72:
+            reason = "brand ngram similarity"
+
+        if reason:
+            boost = 30.0 if distance <= 1 else 25.0
+            if boost > best["boost"]:
+                best = {
+                    "suspicious": True,
+                    "brand": brand,
+                    "reason": reason,
+                    "distance": distance,
+                    "similarity": round(similarity, 3),
+                    "boost": boost,
+                }
+
+    return best
+
 def check_typosquatting(url: str) -> dict:
-    ext     = tldextract.extract(url)
+    ext     = TLD_EXTRACTOR(normalize_url(url))
     domain  = ext.domain.lower()
-    if len(domain) < 4:
+    if len(domain) < 3:
         return {"is_typosquat": False, "closest_brand": None, "distance": 99}
     min_dist = min(levenshtein(domain, brand) for brand in BRAND_NAMES_LEV)
     closest  = min(BRAND_NAMES_LEV, key=lambda b: levenshtein(domain, b))
@@ -154,8 +417,9 @@ def check_typosquatting(url: str) -> dict:
 
 def extract_features(url: str) -> dict:
     try:
+        url        = normalize_url(url)
         parsed     = urlparse(url)
-        ext        = tldextract.extract(url)
+        ext        = TLD_EXTRACTOR(url)
         domain     = f"{ext.domain}.{ext.suffix}" if ext.suffix else ext.domain
         path       = parsed.path or ""
         params     = parsed.query or ""
@@ -200,7 +464,7 @@ def extract_features(url: str) -> dict:
         features["qty_nameservers"]         = -1
         features["qty_mx_servers"]          = -1
         features["ttl_hostname"]            = -1
-        features["tls_ssl_certificate"]     = int(url.startswith("https"))
+        features["tls_ssl_certificate"]     = int(parsed.scheme == "https")
         features["qty_redirects"]           = 0
         features["url_google_index"]        = -1
         features["domain_google_index"]     = -1
@@ -215,6 +479,7 @@ def extract_features(url: str) -> dict:
 
 async def fetch_page_text(url: str) -> str:
     try:
+        url = normalize_url(url)
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 url,
@@ -246,6 +511,7 @@ async def check_virustotal(url: str, stop_event: asyncio.Event = None) -> dict:
     if not VT_API_KEY:
         return {"vt_malicious": 0, "vt_total": 0, "vt_checked": False}
     try:
+        url = normalize_url(url)
         url_id  = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
         headers = {"x-apikey": VT_API_KEY}
         async with aiohttp.ClientSession() as session:
@@ -284,6 +550,7 @@ async def check_google_safe_browsing(url: str) -> dict:
     if not GSB_API_KEY:
         return {"gsb_match": False, "threat_type": None}
     try:
+        url = normalize_url(url)
         payload = {
             "client": {"clientId": "phishing-detector", "clientVersion": "1.0"},
             "threatInfo": {
@@ -317,6 +584,7 @@ async def check_google_safe_browsing(url: str) -> dict:
 
 async def check_phash(url: str) -> dict:
     try:
+        url = normalize_url(url)
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 "http://127.0.0.1:8001/check",
@@ -329,13 +597,16 @@ async def check_phash(url: str) -> dict:
         pass
     return {"is_clone": False, "brand": None, "distance": None}
 
-def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None, fast=None, img=None, dom=None) -> list:
+def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None, fast=None,
+                img=None, dom=None, domain_similarity=None, attack_patterns=None) -> list:
     adv  = adv or {}
     fast = fast or {}
     img  = img or {}
     dom  = dom or {}
+    domain_similarity = domain_similarity or {}
+    attack_patterns = attack_patterns or {}
     signals = []
-    ext = tldextract.extract(url)
+    ext = TLD_EXTRACTOR(normalize_url(url))
     if ext.suffix and ext.suffix.split(".")[-1] in RISKY_TLDS:
         signals.append("Suspicious TLD")
     if re.match(r"^\d+\.\d+\.\d+\.\d+$", ext.domain):
@@ -346,7 +617,7 @@ def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None, fast=None,
         signals.append("Brand name in unknown domain")
     if "@" in url:
         signals.append("@ symbol in URL")
-    if not url.startswith("https"):
+    if urlparse(normalize_url(url)).scheme != "https":
         signals.append("No HTTPS")
     if vt["vt_checked"] and vt["vt_malicious"] > 0:
         signals.append(f"VirusTotal: {vt['vt_malicious']}/{vt['vt_total']} engines flagged")
@@ -358,6 +629,13 @@ def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None, fast=None,
         signals.append(f"Visual clone of {phash['brand'].upper()} detected")
     if typo.get("is_typosquat"):
         signals.append(f"Typosquatting: resembles {typo['closest_brand']} (distance {typo['distance']})")
+    if domain_similarity.get("suspicious"):
+        signals.append(
+            f"Brand lookalike: resembles {domain_similarity.get('brand')} "
+            f"({domain_similarity.get('reason')})"
+        )
+    if attack_patterns.get("patterns"):
+        signals.append(f"Attack pattern: {attack_patterns['patterns'][0].replace('_', ' ')}")
     if adv.get("has_unicode"):
         signals.append("Unicode/Cyrillic homoglyph domain detected")
     elif adv.get("has_homoglyph"):
@@ -390,12 +668,24 @@ def root():
         "vt_enabled":  bool(VT_API_KEY),
         "gsb_enabled": bool(GSB_API_KEY),
         "nlp_enabled": NLP_ENABLED,
-        "trusted_domains_loaded": len(TRUSTED_DOMAINS)
+        "trusted_domains_loaded": len(TRUSTED_DOMAINS),
+        "model_version": model_registry.active_version,
+        "feature_store": "redis" if cache else "disabled",
     }
+
+@app.get("/model-info")
+def model_info():
+    return model_registry.metadata()
+
+@app.get("/metrics")
+def metrics_endpoint():
+    return Response(metrics.render_prometheus(), media_type="text/plain")
 
 @app.post("/check")
 async def check_url(request: URLRequest, db: Session = Depends(get_db)):
-    url = request.url.strip()
+    request_start = time.perf_counter()
+    metrics.increment("phishing_check_requests_total")
+    url = normalize_url(request.url)
     key = cache_key(url)
 
     try:
@@ -404,6 +694,9 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             result = json.loads(cached)
             result["cached"] = True
             result["cache_tier"] = "exact_url"
+            metrics.increment("phishing_cache_hits_total", {"tier": "exact_url"})
+            metrics.increment("phishing_verdict_total", {"verdict": result.get("verdict", "UNKNOWN")})
+            metrics.observe("phishing_check_latency", time.perf_counter() - request_start)
             return result
     except Exception as e:
         print(f"Cache read error: {e}")
@@ -415,44 +708,16 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             result = json.loads(neg_cached)
             result["cached"] = True
             result["cache_tier"] = "negative"
+            metrics.increment("phishing_cache_hits_total", {"tier": "negative"})
+            metrics.increment("phishing_verdict_total", {"verdict": result.get("verdict", "UNKNOWN")})
+            metrics.observe("phishing_check_latency", time.perf_counter() - request_start)
             return result
     except Exception as e:
         print(f"Negative cache read error: {e}")
 
-    ext               = tldextract.extract(url)
-    registered_domain = f"{ext.domain}.{ext.suffix}"
-    full_domain       = f"{ext.subdomain}.{registered_domain}" if ext.subdomain else registered_domain
-    is_cloud_subdomain = any(full_domain.endswith(c) for c in CLOUD_SUBDOMAINS)
-
-    if registered_domain in TRUSTED_DOMAINS and not is_cloud_subdomain:
-        result = {
-            "url": url, "score": 0.0, "verdict": "ALLOW",
-            "signals": [], "cached": False,
-            "details": {
-                "rf_score": 0.0, "xgb_score": 0.0,
-                "vt_malicious": 0, "vt_total": 0,
-                "nlp_score": 0.0, "nlp_boost": 0.0,
-                "phash_clone": False, "phash_brand": None, "phash_boost": 0.0,
-                "gsb_match": False, "gsb_threat": None,
-                "typosquat": False, "typo_boost": 0.0,
-                "homoglyph": False, "unicode_spoof": False,
-                "cloud_hosted": False, "high_entropy": False, "adv_boost": 0.0,
-                "fast_check_used": False, "fast_boost": 0.0,
-                "early_exit_triggered": False,
-                "domain_age_days": None,
-                "age_source": None,
-                "qr_flagged": False, "ocr_suspicious": False,
-                "steganography": False, "image_boost": 0.0,
-                "has_login_form": False, "form_action_mismatch": False,
-                "form_action_domain": None, "hidden_iframe_count": 0,
-                "dom_boost": 0.0
-            }
-        }
-        try:
-            if cache: cache.set(key, json.dumps(result), ex=21600)
-        except:
-            pass
-        return result
+    hostname          = hostname_from_url(url)
+    registered_domain = registered_domain_from_host(hostname)
+    is_cloud_subdomain = is_cloud_hostname(hostname)
 
     dom_key = domain_cache_key(registered_domain)
     try:
@@ -464,6 +729,9 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
                 result["url"] = url
                 result["cached"] = True
                 result["cache_tier"] = "domain_level"
+                metrics.increment("phishing_cache_hits_total", {"tier": "domain_level"})
+                metrics.increment("phishing_verdict_total", {"verdict": result.get("verdict", "UNKNOWN")})
+                metrics.observe("phishing_check_latency", time.perf_counter() - request_start)
                 return result
     except Exception as e:
         print(f"Domain cache read error: {e}")
@@ -471,7 +739,7 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     features = extract_features(url)
 
     domain_for_runtime = registered_domain
-    runtime_feats = await get_runtime_domain_features(domain_for_runtime)
+    runtime_feats = await feature_store.get_or_compute(domain_for_runtime, get_runtime_domain_features)
     features["time_domain_activation"] = runtime_feats["time_domain_activation"]
     features["time_domain_expiration"] = runtime_feats["time_domain_expiration"]
     features["ttl_hostname"]           = runtime_feats["ttl_hostname"]
@@ -506,6 +774,11 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     nlp_prob = nlp_score(page_text)
     typo     = check_typosquatting(url)
     adv      = extract_advanced_features(url)
+    domain_similarity = domain_similarity_check(url)
+    feature_diagnostics = diagnose_lexical_feature_risk(url, features, adv)
+    attack_patterns = classify_attack_pattern(
+        url, features, adv, typo, domain_similarity, dom_result, phash_result
+    )
 
     ml_score    = ensemble_prob * 100
     vt_boost    = 0.0
@@ -513,6 +786,8 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     phash_boost = 0.0
     gsb_boost   = 0.0
     typo_boost  = 0.0
+    similarity_boost = 0.0
+    attack_boost = 0.0
     adv_boost   = 0.0
 
     if vt["vt_checked"] and vt["vt_total"] > 0:
@@ -550,6 +825,11 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     if typo.get("is_typosquat"):
         typo_boost = 25.0
 
+    if domain_similarity.get("suspicious"):
+        similarity_boost = domain_similarity.get("boost", 25.0)
+
+    attack_boost = attack_patterns.get("score", 0.0)
+
     if adv.get("has_homoglyph"):
         adv_boost += 30.0
     if adv.get("is_cloud_hosted") and adv.get("cloud_suspicious"):
@@ -560,26 +840,38 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
         adv_boost += 35.0
     adv_boost = min(adv_boost, 50.0)
 
-    other_signals_present = (vt_boost > 0 or gsb_boost > 0 or typo_boost > 0 or
-                              adv_boost > 0 or nlp_boost > 0 or image_boost > 0 or dom_boost > 0)
-    if not other_signals_present and ml_score < 85:
-        ml_score = ml_score * 0.5
+    positive_rule_score_raw = (
+        vt_boost + nlp_boost + phash_boost + gsb_boost +
+        typo_boost + similarity_boost + attack_boost +
+        adv_boost + image_boost + dom_boost
+    )
+    positive_rule_score = bound_positive_rule_score(positive_rule_score_raw)
+    has_positive_rules = positive_rule_score > 0
+    calibrated_ml_score = calibrate_ml_score(ml_score, has_positive_rules)
+    trust_conflict = has_trust_conflict(
+        vt, gsb, typo, adv, phash_result, dom_result, image_result,
+        domain_similarity, attack_patterns
+    )
+    trusted_candidate = trust_match_for_hostname(hostname)
+    tls_validation = (
+        await validate_tls_certificate(hostname)
+        if trusted_candidate and urlparse(url).scheme == "https"
+        else {"checked": False, "valid": False, "issuer": None, "error": None}
+    )
+    trust_delta, trusted_match = trusted_domain_delta(
+        hostname,
+        trust_conflict or is_cloud_subdomain,
+        tls_validation,
+        urlparse(url).scheme,
+    )
 
-    score   = min(round(
-        ml_score + vt_boost + nlp_boost + phash_boost +
-        gsb_boost + typo_boost + adv_boost + image_boost + dom_boost, 1
-    ), 100.0)
-    signals = get_signals(url, score, vt, nlp_prob, phash_result, gsb, typo, adv, fast_result, image_result, dom_result)
+    score = arbitrate_score(calibrated_ml_score, positive_rule_score, trust_delta)
+    signals = get_signals(
+        url, score, vt, nlp_prob, phash_result, gsb, typo, adv, fast_result,
+        image_result, dom_result, domain_similarity, attack_patterns
+    )
 
-    if score >= 70:
-        verdict = "BLOCK"
-        ttl     = 86400
-    elif score >= 40:
-        verdict = "WARN"
-        ttl     = 3600
-    else:
-        verdict = "ALLOW"
-        ttl     = 3600
+    verdict, ttl = verdict_for_score(score)
 
     try:
         log = ThreatLog(
@@ -608,6 +900,16 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
         "details": {
             "rf_score":            round(rf_prob * 100, 1),
             "xgb_score":           round(xgb_prob * 100, 1),
+            "ml_score_raw":         round(ensemble_prob * 100, 1),
+            "ml_score_calibrated":  round(calibrated_ml_score, 1),
+            "positive_rule_score_raw": round(positive_rule_score_raw, 1),
+            "positive_rule_score":  round(positive_rule_score, 1),
+            "trusted_domain_match": trusted_match,
+            "trust_delta":          round(trust_delta, 1),
+            "trust_conflict":       bool(trust_conflict),
+            "tls_checked":          bool(tls_validation.get("checked")),
+            "tls_valid":            bool(tls_validation.get("valid")),
+            "tls_issuer":           tls_validation.get("issuer"),
             "vt_malicious":        vt["vt_malicious"],
             "vt_total":            vt["vt_total"],
             "vt_boost":            round(vt_boost, 1),
@@ -622,6 +924,12 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             "typosquat":           typo.get("is_typosquat", False),
             "typo_brand":          typo.get("closest_brand"),
             "typo_boost":          typo_boost,
+            "domain_similarity":   domain_similarity,
+            "similarity_boost":    round(similarity_boost, 1),
+            "attack_patterns":     attack_patterns.get("patterns", []),
+            "attack_classifier":   attack_patterns.get("classifier"),
+            "attack_boost":        round(attack_boost, 1),
+            "lexical_diagnostics": feature_diagnostics,
             "homoglyph":           bool(adv.get("has_homoglyph", False)),
             "unicode_spoof":       bool(adv.get("has_unicode", False)),
             "cloud_hosted":        bool(adv.get("is_cloud_hosted", False)),
@@ -633,6 +941,8 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             "early_exit_triggered": stop_event.is_set(),
             "domain_age_days":     features["time_domain_activation"],
             "age_source":          runtime_feats.get("age_source"),
+            "feature_store_hit":    bool(runtime_feats.get("feature_store_hit", False)),
+            "model_version":        model_registry.active_version,
             "qr_flagged":          bool(image_result.get("qr_url_flagged", False)),
             "ocr_suspicious":      bool(image_result.get("ocr_suspicious", False)),
             "steganography":       bool(image_result.get("steganography_detected", False)),
@@ -651,6 +961,20 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             cache.set(dom_key, json.dumps(result), ex=ttl)
     except:
         pass
+
+    metrics.increment("phishing_verdict_total", {"verdict": verdict})
+    metrics.observe("phishing_check_latency", time.perf_counter() - request_start)
+    print(json.dumps({
+        "event": "phishing_check",
+        "registered_domain": registered_domain,
+        "score": score,
+        "verdict": verdict,
+        "model_version": model_registry.active_version,
+        "positive_rule_score": round(positive_rule_score, 1),
+        "trust_delta": round(trust_delta, 1),
+        "attack_patterns": attack_patterns.get("patterns", []),
+        "feature_store_hit": bool(runtime_feats.get("feature_store_hit", False)),
+    }))
 
     return result
 

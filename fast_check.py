@@ -5,9 +5,14 @@ from datetime import datetime, timezone
 
 async def fast_definitive_check(url: str) -> dict:
     from urllib.parse import urlparse
-    domain = urlparse(url).netloc.lower()
+    if "://" not in url:
+        url = f"https://{url}"
+    parsed = urlparse(url)
+    domain = (parsed.hostname or "").lower().rstrip(".")
     if domain.startswith("www."):
         domain = domain[4:]
+    if not domain:
+        return {"early_exit": False, "partial_score": 0, "signals": []}
 
     whois_age, cert_age = await asyncio.gather(
         _get_domain_age_days(domain),

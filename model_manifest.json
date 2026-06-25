@@ -1,0 +1,13 @@
+{
+  "active_version": "v2",
+  "models": {
+    "v2": {
+      "rf": "model_rf_v2.pkl",
+      "xgb": "model_xgb_v2.pkl",
+      "feature_columns": "feature_cols_v2.pkl",
+      "nlp_model": "nlp_model.pkl",
+      "nlp_vectorizer": "nlp_vectorizer.pkl",
+      "notes": "Current production phishing classifier artifacts."
+    }
+  }
+}
