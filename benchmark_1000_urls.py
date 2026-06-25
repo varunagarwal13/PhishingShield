@@ -1,4 +1,5 @@
 import asyncio
+import argparse
 import json
 import random
 import string
@@ -10,7 +11,25 @@ warnings.filterwarnings("ignore")
 
 import main
 SEED = 20260625
-TOTAL_URLS = 1000
+
+PROFILES = {
+    "balanced_1000": {
+        "total": 1000,
+        "daily_usage": 400,
+        "legitimate_sensitive": 100,
+        "synthetic_phishing": 300,
+        "unknown_random": 200,
+        "title": "1,000 URL Benchmark Report",
+    },
+    "daily_2000": {
+        "total": 2000,
+        "daily_usage": 1400,
+        "legitimate_sensitive": 200,
+        "synthetic_phishing": 250,
+        "unknown_random": 150,
+        "title": "2,000 URL Daily-Heavy Benchmark Report",
+    },
+}
 
 ROOT = Path(__file__).resolve().parent
 OUTPUTS = ROOT.parent.parent / "outputs"
@@ -80,7 +99,7 @@ def generate_unknown_urls(rng, count=200):
     return urls
 
 
-def generate_legitimate_sensitive_urls():
+def generate_legitimate_sensitive_urls(limit=100):
     base = [
         "https://accounts.google.com",
         "https://login.microsoftonline.com",
@@ -108,35 +127,43 @@ def generate_legitimate_sensitive_urls():
     for domain in base:
         for path in paths:
             urls.append(domain.rstrip("/") + path)
-    return urls[:100]
+    while len(urls) < limit:
+        for domain in base:
+            for path in paths:
+                urls.append(domain.rstrip("/") + f"{path}?sample={len(urls)}")
+                if len(urls) >= limit:
+                    break
+            if len(urls) >= limit:
+                break
+    return urls[:limit]
 
 
-def build_dataset():
+def build_dataset(profile):
     rng = random.Random(SEED)
     rows = []
 
-    for domain in load_daily_domains(400):
+    for domain in load_daily_domains(profile["daily_usage"]):
         rows.append({
             "url": f"https://{domain}",
             "category": "daily_usage",
             "expected": "benign",
         })
 
-    for url in generate_legitimate_sensitive_urls():
+    for url in generate_legitimate_sensitive_urls(profile["legitimate_sensitive"]):
         rows.append({
             "url": url,
             "category": "legitimate_sensitive",
             "expected": "benign",
         })
 
-    for url in generate_phishing_urls(rng, 300):
+    for url in generate_phishing_urls(rng, profile["synthetic_phishing"]):
         rows.append({
             "url": url,
             "category": "synthetic_phishing",
             "expected": "phishing",
         })
 
-    for url in generate_unknown_urls(rng, 200):
+    for url in generate_unknown_urls(rng, profile["unknown_random"]):
         rows.append({
             "url": url,
             "category": "unknown_random",
@@ -144,7 +171,7 @@ def build_dataset():
         })
 
     rng.shuffle(rows)
-    return rows[:TOTAL_URLS]
+    return rows[:profile["total"]]
 
 
 async def fake_runtime_features(domain):
@@ -226,9 +253,9 @@ def patch_external_dependencies():
     main.validate_tls_certificate = fake_tls
 
 
-async def run_benchmark():
+async def run_benchmark(profile):
     patch_external_dependencies()
-    dataset = build_dataset()
+    dataset = build_dataset(profile)
     db = DummyDB()
     results = []
 
@@ -256,7 +283,7 @@ async def run_benchmark():
     return results
 
 
-def summarize(results):
+def summarize(results, profile_name):
     verdict_counts = Counter(row["verdict"] for row in results)
     category_counts = Counter(row["category"] for row in results)
     by_category = defaultdict(Counter)
@@ -277,6 +304,7 @@ def summarize(results):
     return {
         "total": len(results),
         "seed": SEED,
+        "profile": profile_name,
         "verdict_counts": dict(verdict_counts),
         "category_counts": dict(category_counts),
         "by_category": {k: dict(v) for k, v in by_category.items()},
@@ -292,14 +320,17 @@ def summarize(results):
     }
 
 
-def write_outputs(results, summary):
-    json_path = OUTPUTS / "url_benchmark_1000_results.json"
-    md_path = OUTPUTS / "url_benchmark_1000_report.md"
+def write_outputs(results, summary, profile):
+    total = summary["total"]
+    profile_name = summary["profile"]
+    json_path = OUTPUTS / f"url_benchmark_{total}_{profile_name}_results.json"
+    md_path = OUTPUTS / f"url_benchmark_{total}_{profile_name}_report.md"
     json_path.write_text(json.dumps({"summary": summary, "results": results}, indent=2), encoding="utf-8")
 
     lines = [
-        "# 1,000 URL Benchmark Report",
+        f"# {profile['title']}",
         "",
+        f"Profile: `{profile_name}`",
         f"Seed: `{summary['seed']}`",
         f"Total URLs: `{summary['total']}`",
         "",
@@ -357,10 +388,23 @@ def write_outputs(results, summary):
     return json_path, md_path
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run synthetic URL benchmark profiles.")
+    parser.add_argument(
+        "--profile",
+        choices=sorted(PROFILES),
+        default="balanced_1000",
+        help="Benchmark profile to run.",
+    )
+    return parser.parse_args()
+
+
 def main_entry():
-    results = asyncio.run(run_benchmark())
-    summary = summarize(results)
-    json_path, md_path = write_outputs(results, summary)
+    args = parse_args()
+    profile = PROFILES[args.profile]
+    results = asyncio.run(run_benchmark(profile))
+    summary = summarize(results, args.profile)
+    json_path, md_path = write_outputs(results, summary, profile)
     compact_summary = dict(summary)
     compact_summary["highest_risk"] = [
         {

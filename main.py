@@ -12,6 +12,7 @@ import aiohttp
 import socket
 import ssl
 import time
+from pathlib import Path
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from database import init_db, get_db, ThreatLog, FeedbackLog
@@ -80,6 +81,24 @@ def load_trusted_domains():
 
 TRUSTED_DOMAINS = load_trusted_domains()
 
+def load_top_ranked_domains(limit=10000):
+    domains = set()
+    path = Path(__file__).resolve().parent / "alexa_top10k.txt"
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                domain = line.strip().lower().rstrip(".")
+                if domain and "." in domain:
+                    domains.add(domain)
+                if len(domains) >= limit:
+                    break
+    except Exception as e:
+        print(f"Top ranked domain list not available: {e}")
+    print(f"Loaded {len(domains)} top ranked domains")
+    return domains
+
+TOP_RANKED_DOMAINS = load_top_ranked_domains()
+
 CLOUD_SUBDOMAINS = {
     # Google
     "sites.google.com", "docs.google.com", "drive.google.com",
@@ -112,6 +131,16 @@ LEGITIMATE_INFRASTRUCTURE_DOMAINS = {
     "icloud.com", "fastly.net", "fastly-edge.com", "sentry.io", "azurefd.net",
     "azureedge.net", "cloudflare.com", "cloudflareinsights.com",
     "digicert.com", "appsflyersdk.com", "facebook.net",
+}
+
+GLOBAL_ALLOWLIST_DOMAINS = {
+    "microsoft365.com", "microsoftonline.us", "msedge.net",
+    "msftconnecttest.com", "trafficmanager.net", "adobelogin.com",
+    "ssl-images-amazon.com", "amazon-adsystem.com", "cdninstagram.com",
+    "whatsapp.net", "netflix.net", "googletagmanager.com",
+    "googleadservices.com", "googlevideo.com", "akamaihd.net",
+    "akadns.net", "akamaized.net", "cloudfront.net", "fastly.net",
+    "tiqcdn.com", "crwdcntrl.net", "casalemedia.com", "adsrvr.org",
 }
 
 RISKY_TLDS = {"tk","ml","ga","cf","gq","top","xyz","club","online","site",
@@ -194,6 +223,31 @@ def infrastructure_match_for_hostname(hostname: str) -> str | None:
 
 def is_legitimate_infrastructure_hostname(hostname: str) -> bool:
     return infrastructure_match_for_hostname(hostname) is not None
+
+def global_allowlist_match_for_hostname(hostname: str) -> str | None:
+    hostname = hostname.lower().rstrip(".")
+    for allow_domain in sorted(GLOBAL_ALLOWLIST_DOMAINS, key=len, reverse=True):
+        if host_matches_domain(hostname, allow_domain):
+            return allow_domain
+    return None
+
+def top_ranked_match_for_hostname(hostname: str) -> str | None:
+    hostname = hostname.lower().rstrip(".")
+    registered_domain = registered_domain_from_host(hostname)
+    if hostname in TOP_RANKED_DOMAINS:
+        return hostname
+    if registered_domain in TOP_RANKED_DOMAINS:
+        return registered_domain
+    return None
+
+def high_confidence_allow_match(hostname: str) -> tuple[str | None, str | None]:
+    allow_match = global_allowlist_match_for_hostname(hostname)
+    if allow_match:
+        return allow_match, "global_allowlist"
+    top_match = top_ranked_match_for_hostname(hostname)
+    if top_match:
+        return top_match, "top_ranked_domain"
+    return None, None
 
 def verdict_for_score(score: float) -> tuple[str, int]:
     if score >= 90:
@@ -407,6 +461,7 @@ def domain_similarity_check(url: str) -> dict:
     normalized_domain = normalize_brand_text(domain)
     trusted_match = trust_match_for_hostname(hostname)
     infra_match = infrastructure_match_for_hostname(hostname)
+    allow_match, allow_source = high_confidence_allow_match(hostname)
 
     best = {
         "suspicious": False,
@@ -416,18 +471,27 @@ def domain_similarity_check(url: str) -> dict:
         "similarity": 0.0,
         "boost": 0.0,
     }
-    if trusted_match or infra_match or len(normalized_domain) < 3:
+    if trusted_match or infra_match or allow_match or len(normalized_domain) < 3:
+        if allow_match:
+            best["allowlist_match"] = allow_match
+            best["allowlist_source"] = allow_source
         return best
 
     domain_tokens = [t for t in re.split(r"[^a-z0-9]+", domain) if t]
+    token_set = set(domain_tokens)
+    suspicious_tokens = {"login", "secure", "verify", "account", "update", "confirm", "wallet"}
     for brand in BRAND_NAMES_LEV:
         normalized_brand = normalize_brand_text(brand)
         distance = levenshtein(normalized_domain, normalized_brand)
         similarity = ngram_similarity(normalized_domain, normalized_brand)
         reason = None
 
-        if brand in domain_tokens or brand in normalized_domain:
+        if brand in token_set and token_set & suspicious_tokens:
+            reason = "brand term with credential lure tokens"
+        elif brand in token_set:
             reason = "brand term in untrusted domain"
+        elif brand in normalized_domain and token_set & suspicious_tokens:
+            reason = "embedded brand term with credential lure tokens"
         elif distance <= 1:
             reason = "near brand edit distance"
         elif len(normalized_brand) >= 5 and distance <= 2 and similarity >= 0.45:
@@ -661,7 +725,9 @@ def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None, fast=None,
         signals.append("IP address as domain")
     if any(w in url.lower() for w in ["verify","secure","confirm","credential","suspend"]):
         signals.append("Suspicious keywords in URL")
-    if (not is_legitimate_infrastructure_hostname(hostname_from_url(url)) and
+    hostname = hostname_from_url(url)
+    allow_match, _ = high_confidence_allow_match(hostname)
+    if (not is_legitimate_infrastructure_hostname(hostname) and not allow_match and
             any(b in ext.domain.lower() for b in ["paypal","microsoft","apple","amazon","google"])):
         signals.append("Brand name in unknown domain")
     if "@" in url:
@@ -789,6 +855,59 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
                 return result
     except Exception as e:
         print(f"Domain cache read error: {e}")
+
+    allow_match, allow_source = high_confidence_allow_match(hostname)
+    if allow_match and urlparse(url).scheme == "https":
+        stop_event = asyncio.Event()
+        vt, gsb = await asyncio.gather(
+            check_virustotal(url, stop_event),
+            check_google_safe_browsing(url),
+        )
+        explicit_reputation_hit = (
+            (vt.get("vt_checked") and vt.get("vt_malicious", 0) > 0) or
+            bool(gsb.get("gsb_match"))
+        )
+        if explicit_reputation_hit:
+            score = 100.0
+            verdict, ttl = verdict_for_score(score)
+            signals = []
+            if vt.get("vt_checked") and vt.get("vt_malicious", 0) > 0:
+                signals.append(f"VirusTotal: {vt['vt_malicious']}/{vt['vt_total']} engines flagged")
+            if gsb.get("gsb_match"):
+                signals.append(f"Google Safe Browsing: {gsb.get('threat_type','threat')} detected")
+        else:
+            score = 5.0
+            verdict, ttl = "ALLOW", 3600
+            signals = [f"High-confidence allow: {allow_source} ({allow_match})"]
+
+        result = {
+            "url": url,
+            "score": score,
+            "verdict": verdict,
+            "signals": signals[:3],
+            "cached": False,
+            "details": {
+                "fast_check_used": True,
+                "fast_path": "high_confidence_allow",
+                "allowlist_match": allow_match,
+                "allowlist_source": allow_source,
+                "registered_domain": registered_domain,
+                "vt_malicious": vt.get("vt_malicious", 0),
+                "vt_total": vt.get("vt_total", 0),
+                "vt_checked": vt.get("vt_checked", False),
+                "gsb_match": gsb.get("gsb_match", False),
+                "gsb_threat": gsb.get("threat_type"),
+                "model_version": model_registry.active_version,
+            }
+        }
+        try:
+            if cache:
+                cache.set(key, json.dumps(result), ex=ttl)
+        except Exception as e:
+            print(f"Cache write error: {e}")
+        metrics.increment("phishing_verdict_total", {"verdict": verdict})
+        metrics.observe("phishing_check_latency", time.perf_counter() - request_start)
+        return result
 
     features = extract_features(url)
 

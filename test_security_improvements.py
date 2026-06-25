@@ -170,6 +170,34 @@ class SecurityImprovementTests(unittest.TestCase):
 
         self.assertNotIn("cloud_hosted_phishing", attack["patterns"])
 
+    def test_global_allowlist_uses_domain_boundaries(self):
+        match, source = main.high_confidence_allow_match("images-na.ssl-images-amazon.com")
+
+        self.assertEqual(match, "ssl-images-amazon.com")
+        self.assertEqual(source, "global_allowlist")
+        self.assertEqual(main.high_confidence_allow_match("ssl-images-amazon.com.evil.com"), (None, None))
+
+    def test_top_ranked_brand_infrastructure_is_not_impersonation(self):
+        urls = [
+            "https://microsoftonline.us",
+            "https://cdninstagram.com",
+            "https://axp.amazon-adsystem.com",
+            "https://mmx-ds.cdn.whatsapp.net",
+        ]
+
+        for url in urls:
+            with self.subTest(url=url):
+                match, source = main.high_confidence_allow_match(main.hostname_from_url(url))
+                self.assertIsNotNone(match)
+                self.assertIn(source, {"global_allowlist", "top_ranked_domain"})
+                self.assertFalse(main.domain_similarity_check(url)["suspicious"])
+
+    def test_phishing_brand_lure_still_flags_after_structural_refine(self):
+        similarity = main.domain_similarity_check("https://login-amazon-security.work/confirm")
+
+        self.assertTrue(similarity["suspicious"])
+        self.assertEqual(similarity["brand"], "amazon")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
