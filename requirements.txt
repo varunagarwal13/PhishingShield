@@ -17,4 +17,4 @@ numpy
 Pillow
 pytesseract
 requests
-pyzbar
+pyzbarslowapi

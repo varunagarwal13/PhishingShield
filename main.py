@@ -1,6 +1,9 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, Request, HTTPException
 from fastapi.security.api_key import APIKeyHeader
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import joblib
@@ -52,6 +55,9 @@ TRUSTED_DOMAINS = {
 RISKY_TLDS = {"tk","ml","ga","cf","gq","top","xyz","club","online","site",
               "work","party","live","click","link","win","loan","download"}
 
+# Fix #11: Rate limiter — 30 requests/minute per IP on /check
+limiter = Limiter(key_func=get_remote_address, default_limits=["200/day", "60/hour"])
+
 # Fix #3: API key header scheme
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
@@ -62,8 +68,7 @@ def require_api_key(key: str = Depends(api_key_header)):
 
 
 # Fix #1 + #8: lifespan replaces deprecated @app.on_event("startup")
-# Models are stored on app.state so they are accessible from any route
-# without relying on module-level globals.
+# Models stored on app.state — accessible from any route, no module-level globals
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -100,6 +105,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Phishing Detector API v2", lifespan=lifespan)
+
+# Fix #11: attach limiter and its exception handler to the app
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 # --- Request models ---
@@ -210,9 +219,9 @@ def extract_features(url: str, feature_cols: list) -> dict:
         return {col: -1 for col in feature_cols}
 
 
-# Fix #4: ssl=False is intentional — phishing pages often have bad/self-signed certs
-# and we only use the page text for NLP, never for security decisions.
-# SSRF is mitigated by is_private_host() called before this function.
+# Fix #4: ssl=False intentional — phishing pages often have bad/self-signed certs.
+# Page text is only used for NLP scoring, never for security decisions.
+# SSRF mitigated by is_private_host() called before this function.
 async def fetch_page_text(url: str) -> str:
     if is_private_host(url):
         logger.warning(f"Blocked fetch to private/loopback host: {url}")
@@ -326,7 +335,9 @@ def root(request: Request):
 
 
 # Fix #3: /check protected by API key (enforced only when API_KEY env var is set)
+# Fix #11: rate limited to 30 requests/minute per IP
 @app.post("/check")
+@limiter.limit("30/minute")
 async def check_url(
     url_request: URLRequest,
     request: Request,
