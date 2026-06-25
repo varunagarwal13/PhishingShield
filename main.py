@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import joblib
@@ -11,6 +11,7 @@ import redis
 import aiohttp
 import socket
 import ssl
+import time
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from database import init_db, get_db, ThreatLog, FeedbackLog
@@ -23,6 +24,9 @@ from fast_check import fast_definitive_check
 from runtime_features import get_runtime_domain_features
 from image_scan import run_image_scan
 from dom_check import check_dom_signals
+from feature_store import DomainFeatureStore
+from model_registry import ModelRegistry
+from observability import MetricsCollector
 
 load_dotenv()
 VT_API_KEY  = os.getenv("VT_API_KEY", "")
@@ -31,25 +35,19 @@ REDIS_URL   = os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
 
 app = FastAPI(title="Phishing Detector API v8")
 TLD_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None)
+metrics = MetricsCollector()
 
 @app.on_event("startup")
 def startup():
     init_db()
 
 print("Loading models...")
-rf           = joblib.load("model_rf_v2.pkl")
-xgb          = joblib.load("model_xgb_v2.pkl")
-FEATURE_COLS = joblib.load("feature_cols_v2.pkl")
-print(f"ML models loaded. Features: {len(FEATURE_COLS)}")
+model_registry = ModelRegistry()
+rf, xgb, FEATURE_COLS = model_registry.load_core_models()
+print(f"ML models loaded. Version: {model_registry.active_version}. Features: {len(FEATURE_COLS)}")
 
-try:
-    nlp_vectorizer = joblib.load("nlp_vectorizer.pkl")
-    nlp_clf        = joblib.load("nlp_model.pkl")
-    NLP_ENABLED    = True
-    print("NLP model loaded.")
-except:
-    NLP_ENABLED = False
-    print("NLP model not found.")
+nlp_vectorizer, nlp_clf, NLP_ENABLED = model_registry.load_nlp_models()
+print("NLP model loaded." if NLP_ENABLED else "NLP model not found.")
 
 try:
     cache = redis.from_url(REDIS_URL, decode_responses=True)
@@ -58,6 +56,8 @@ try:
 except:
     cache = None
     print("Redis not available.")
+
+feature_store = DomainFeatureStore(cache)
 
 def load_trusted_domains():
     domains = {
@@ -668,11 +668,23 @@ def root():
         "vt_enabled":  bool(VT_API_KEY),
         "gsb_enabled": bool(GSB_API_KEY),
         "nlp_enabled": NLP_ENABLED,
-        "trusted_domains_loaded": len(TRUSTED_DOMAINS)
+        "trusted_domains_loaded": len(TRUSTED_DOMAINS),
+        "model_version": model_registry.active_version,
+        "feature_store": "redis" if cache else "disabled",
     }
+
+@app.get("/model-info")
+def model_info():
+    return model_registry.metadata()
+
+@app.get("/metrics")
+def metrics_endpoint():
+    return Response(metrics.render_prometheus(), media_type="text/plain")
 
 @app.post("/check")
 async def check_url(request: URLRequest, db: Session = Depends(get_db)):
+    request_start = time.perf_counter()
+    metrics.increment("phishing_check_requests_total")
     url = normalize_url(request.url)
     key = cache_key(url)
 
@@ -682,6 +694,9 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             result = json.loads(cached)
             result["cached"] = True
             result["cache_tier"] = "exact_url"
+            metrics.increment("phishing_cache_hits_total", {"tier": "exact_url"})
+            metrics.increment("phishing_verdict_total", {"verdict": result.get("verdict", "UNKNOWN")})
+            metrics.observe("phishing_check_latency", time.perf_counter() - request_start)
             return result
     except Exception as e:
         print(f"Cache read error: {e}")
@@ -693,6 +708,9 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             result = json.loads(neg_cached)
             result["cached"] = True
             result["cache_tier"] = "negative"
+            metrics.increment("phishing_cache_hits_total", {"tier": "negative"})
+            metrics.increment("phishing_verdict_total", {"verdict": result.get("verdict", "UNKNOWN")})
+            metrics.observe("phishing_check_latency", time.perf_counter() - request_start)
             return result
     except Exception as e:
         print(f"Negative cache read error: {e}")
@@ -711,6 +729,9 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
                 result["url"] = url
                 result["cached"] = True
                 result["cache_tier"] = "domain_level"
+                metrics.increment("phishing_cache_hits_total", {"tier": "domain_level"})
+                metrics.increment("phishing_verdict_total", {"verdict": result.get("verdict", "UNKNOWN")})
+                metrics.observe("phishing_check_latency", time.perf_counter() - request_start)
                 return result
     except Exception as e:
         print(f"Domain cache read error: {e}")
@@ -718,7 +739,7 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     features = extract_features(url)
 
     domain_for_runtime = registered_domain
-    runtime_feats = await get_runtime_domain_features(domain_for_runtime)
+    runtime_feats = await feature_store.get_or_compute(domain_for_runtime, get_runtime_domain_features)
     features["time_domain_activation"] = runtime_feats["time_domain_activation"]
     features["time_domain_expiration"] = runtime_feats["time_domain_expiration"]
     features["ttl_hostname"]           = runtime_feats["ttl_hostname"]
@@ -920,6 +941,8 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             "early_exit_triggered": stop_event.is_set(),
             "domain_age_days":     features["time_domain_activation"],
             "age_source":          runtime_feats.get("age_source"),
+            "feature_store_hit":    bool(runtime_feats.get("feature_store_hit", False)),
+            "model_version":        model_registry.active_version,
             "qr_flagged":          bool(image_result.get("qr_url_flagged", False)),
             "ocr_suspicious":      bool(image_result.get("ocr_suspicious", False)),
             "steganography":       bool(image_result.get("steganography_detected", False)),
@@ -938,6 +961,20 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             cache.set(dom_key, json.dumps(result), ex=ttl)
     except:
         pass
+
+    metrics.increment("phishing_verdict_total", {"verdict": verdict})
+    metrics.observe("phishing_check_latency", time.perf_counter() - request_start)
+    print(json.dumps({
+        "event": "phishing_check",
+        "registered_domain": registered_domain,
+        "score": score,
+        "verdict": verdict,
+        "model_version": model_registry.active_version,
+        "positive_rule_score": round(positive_rule_score, 1),
+        "trust_delta": round(trust_delta, 1),
+        "attack_patterns": attack_patterns.get("patterns", []),
+        "feature_store_hit": bool(runtime_feats.get("feature_store_hit", False)),
+    }))
 
     return result
 
