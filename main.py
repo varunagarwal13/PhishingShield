@@ -9,6 +9,8 @@ import asyncio
 import tldextract
 import redis
 import aiohttp
+import socket
+import ssl
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from database import init_db, get_db, ThreatLog, FeedbackLog
@@ -73,15 +75,7 @@ def load_trusted_domains():
         "hdfcbank.com","icicibank.com","axisbank.com","kotak.com",
         "paytm.com","microsoftonline.com"
     }
-    try:
-        with open("alexa_top10k.txt", "r") as f:
-            for line in f:
-                d = line.strip().lower()
-                if d:
-                    domains.add(d)
-        print(f"Loaded {len(domains)} trusted domains (including top 10k)")
-    except FileNotFoundError:
-        print("alexa_top10k.txt not found, using hardcoded list only")
+    print(f"Loaded {len(domains)} curated trusted domains")
     return domains
 
 TRUSTED_DOMAINS = load_trusted_domains()
@@ -157,8 +151,18 @@ def host_matches_domain(hostname: str, trusted_domain: str) -> bool:
     trusted_domain = trusted_domain.lower().rstrip(".")
     return hostname == trusted_domain or hostname.endswith(f".{trusted_domain}")
 
+def trust_match_for_hostname(hostname: str) -> str | None:
+    hostname = hostname.lower().rstrip(".")
+    hostname_registered_domain = registered_domain_from_host(hostname)
+    for trusted_domain in sorted(TRUSTED_DOMAINS, key=len, reverse=True):
+        trusted_domain = trusted_domain.lower().rstrip(".")
+        if (host_matches_domain(hostname, trusted_domain) and
+                hostname_registered_domain == registered_domain_from_host(trusted_domain)):
+            return trusted_domain
+    return None
+
 def is_trusted_hostname(hostname: str) -> bool:
-    return any(host_matches_domain(hostname, trusted) for trusted in TRUSTED_DOMAINS)
+    return trust_match_for_hostname(hostname) is not None
 
 def is_cloud_hostname(hostname: str) -> bool:
     return any(host_matches_domain(hostname, cloud_domain) for cloud_domain in CLOUD_SUBDOMAINS)
@@ -171,6 +175,70 @@ def verdict_for_score(score: float) -> tuple[str, int]:
     if score >= 40:
         return "MONITOR", 3600
     return "ALLOW", 3600
+
+def clamp_score(score: float) -> float:
+    return min(max(round(score, 1), 0.0), 100.0)
+
+def calibrate_ml_score(ml_score: float, has_positive_rules: bool) -> float:
+    if not has_positive_rules and ml_score < 85:
+        return ml_score * 0.5
+    return ml_score
+
+def has_trust_conflict(vt, gsb, typo, adv, phash, dom, image) -> bool:
+    return (
+        (vt.get("vt_checked") and vt.get("vt_malicious", 0) > 0) or
+        bool(gsb.get("gsb_match")) or
+        bool(typo.get("is_typosquat")) or
+        bool(phash.get("is_clone") and phash.get("brand")) or
+        bool(adv.get("has_homoglyph")) or
+        bool(adv.get("is_cloud_hosted") and adv.get("cloud_suspicious")) or
+        bool(adv.get("has_ip_in_domain")) or
+        bool(image.get("qr_url_flagged")) or
+        bool(dom.get("has_login_form") and dom.get("form_action_mismatch"))
+    )
+
+async def validate_tls_certificate(hostname: str) -> dict:
+    if not hostname:
+        return {"checked": False, "valid": False, "issuer": None, "error": "missing hostname"}
+    loop = asyncio.get_event_loop()
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, _validate_tls_certificate, hostname), timeout=4.0
+        )
+    except Exception as e:
+        return {"checked": False, "valid": False, "issuer": None, "error": str(e)}
+
+def _validate_tls_certificate(hostname: str) -> dict:
+    ctx = ssl.create_default_context()
+    with socket.create_connection((hostname, 443), timeout=3) as sock:
+        with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
+            cert = ssock.getpeercert()
+    issuer = None
+    issuer_parts = cert.get("issuer", ())
+    for group in issuer_parts:
+        for key, value in group:
+            if key == "organizationName":
+                issuer = value
+                break
+        if issuer:
+            break
+    return {"checked": True, "valid": True, "issuer": issuer, "error": None}
+
+def trusted_domain_delta(
+    hostname: str,
+    has_conflict: bool,
+    tls_validation: dict | None = None,
+    scheme: str = "https",
+) -> tuple[float, str | None]:
+    trusted_match = trust_match_for_hostname(hostname)
+    if not trusted_match or has_conflict or scheme != "https":
+        return 0.0, trusted_match
+    if tls_validation and tls_validation.get("valid"):
+        return -25.0, trusted_match
+    return -10.0, trusted_match
+
+def arbitrate_score(ml_score: float, positive_rule_score: float, trust_delta: float) -> float:
+    return clamp_score(ml_score + positive_rule_score + trust_delta)
 
 def levenshtein(s1: str, s2: str) -> int:
     if len(s1) < len(s2):
@@ -471,36 +539,6 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     registered_domain = registered_domain_from_host(hostname)
     is_cloud_subdomain = is_cloud_hostname(hostname)
 
-    if is_trusted_hostname(hostname) and not is_cloud_subdomain:
-        result = {
-            "url": url, "score": 0.0, "verdict": "ALLOW",
-            "signals": [], "cached": False,
-            "details": {
-                "rf_score": 0.0, "xgb_score": 0.0,
-                "vt_malicious": 0, "vt_total": 0,
-                "nlp_score": 0.0, "nlp_boost": 0.0,
-                "phash_clone": False, "phash_brand": None, "phash_boost": 0.0,
-                "gsb_match": False, "gsb_threat": None,
-                "typosquat": False, "typo_boost": 0.0,
-                "homoglyph": False, "unicode_spoof": False,
-                "cloud_hosted": False, "high_entropy": False, "adv_boost": 0.0,
-                "fast_check_used": False, "fast_boost": 0.0,
-                "early_exit_triggered": False,
-                "domain_age_days": None,
-                "age_source": None,
-                "qr_flagged": False, "ocr_suspicious": False,
-                "steganography": False, "image_boost": 0.0,
-                "has_login_form": False, "form_action_mismatch": False,
-                "form_action_domain": None, "hidden_iframe_count": 0,
-                "dom_boost": 0.0
-            }
-        }
-        try:
-            if cache: cache.set(key, json.dumps(result), ex=21600)
-        except:
-            pass
-        return result
-
     dom_key = domain_cache_key(registered_domain)
     try:
         domain_cached = cache.get(dom_key) if cache else None
@@ -607,15 +645,27 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
         adv_boost += 35.0
     adv_boost = min(adv_boost, 50.0)
 
-    other_signals_present = (vt_boost > 0 or gsb_boost > 0 or typo_boost > 0 or
-                              adv_boost > 0 or nlp_boost > 0 or image_boost > 0 or dom_boost > 0)
-    if not other_signals_present and ml_score < 85:
-        ml_score = ml_score * 0.5
+    positive_rule_score = (
+        vt_boost + nlp_boost + phash_boost + gsb_boost +
+        typo_boost + adv_boost + image_boost + dom_boost
+    )
+    has_positive_rules = positive_rule_score > 0
+    calibrated_ml_score = calibrate_ml_score(ml_score, has_positive_rules)
+    trust_conflict = has_trust_conflict(vt, gsb, typo, adv, phash_result, dom_result, image_result)
+    trusted_candidate = trust_match_for_hostname(hostname)
+    tls_validation = (
+        await validate_tls_certificate(hostname)
+        if trusted_candidate and urlparse(url).scheme == "https"
+        else {"checked": False, "valid": False, "issuer": None, "error": None}
+    )
+    trust_delta, trusted_match = trusted_domain_delta(
+        hostname,
+        trust_conflict or is_cloud_subdomain,
+        tls_validation,
+        urlparse(url).scheme,
+    )
 
-    score   = min(round(
-        ml_score + vt_boost + nlp_boost + phash_boost +
-        gsb_boost + typo_boost + adv_boost + image_boost + dom_boost, 1
-    ), 100.0)
+    score = arbitrate_score(calibrated_ml_score, positive_rule_score, trust_delta)
     signals = get_signals(url, score, vt, nlp_prob, phash_result, gsb, typo, adv, fast_result, image_result, dom_result)
 
     verdict, ttl = verdict_for_score(score)
@@ -647,6 +697,15 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
         "details": {
             "rf_score":            round(rf_prob * 100, 1),
             "xgb_score":           round(xgb_prob * 100, 1),
+            "ml_score_raw":         round(ensemble_prob * 100, 1),
+            "ml_score_calibrated":  round(calibrated_ml_score, 1),
+            "positive_rule_score":  round(positive_rule_score, 1),
+            "trusted_domain_match": trusted_match,
+            "trust_delta":          round(trust_delta, 1),
+            "trust_conflict":       bool(trust_conflict),
+            "tls_checked":          bool(tls_validation.get("checked")),
+            "tls_valid":            bool(tls_validation.get("valid")),
+            "tls_issuer":           tls_validation.get("issuer"),
             "vt_malicious":        vt["vt_malicious"],
             "vt_total":            vt["vt_total"],
             "vt_boost":            round(vt_boost, 1),
