@@ -22,6 +22,16 @@ class DomainPolicyTests(unittest.TestCase):
         self.assertFalse(main.is_trusted_hostname(hostname))
         self.assertIsNone(main.trust_match_for_hostname(hostname))
 
+        similarity = main.domain_similarity_check("login-microsoft-security.com")
+        self.assertTrue(similarity["suspicious"])
+        self.assertEqual(similarity["brand"], "microsoft")
+
+    def test_short_brand_lookalike_is_detected(self):
+        similarity = main.domain_similarity_check("sbl.co.in")
+
+        self.assertTrue(similarity["suspicious"])
+        self.assertEqual(similarity["brand"], "sbi")
+
     def test_trusted_text_inside_attacker_domain_is_not_trusted(self):
         hostname = main.hostname_from_url("sbi.bank.in.evil.com")
 
@@ -66,6 +76,37 @@ class DomainPolicyTests(unittest.TestCase):
 
         self.assertEqual(calibrated_ml, 40.0)
         self.assertEqual(main.arbitrate_score(calibrated_ml, 20.0, -25.0), 35.0)
+
+    def test_positive_rule_score_is_bounded(self):
+        self.assertEqual(main.bound_positive_rule_score(132.5), 75.0)
+
+    def test_attack_pattern_classifier_detects_brand_lure(self):
+        similarity = main.domain_similarity_check("login-microsoft-security.com/verify")
+        attack = main.classify_attack_pattern(
+            "login-microsoft-security.com/verify",
+            {"qty_redirects": 0, "url_shortened": 0},
+            {},
+            {"is_typosquat": False},
+            similarity,
+            {},
+            {},
+        )
+
+        self.assertIn("brand_impersonation", attack["patterns"])
+        self.assertIn("credential_lure_url", attack["patterns"])
+        self.assertGreaterEqual(attack["score"], 20.0)
+
+    def test_lexical_feature_diagnostics_identify_dominant_features(self):
+        diagnostics = main.diagnose_lexical_feature_risk(
+            "https://secure-bank-login.example.com/account/verify",
+            {"length_url": 88, "domain_length": 31, "qty_hyphen_domain": 2},
+            {"subdomain_depth": 3, "keyword_count": 4},
+        )
+
+        self.assertIn("login", diagnostics["keyword_hits"])
+        self.assertIn("deep_subdomain", diagnostics["risk_features"])
+        self.assertIn("long_domain", diagnostics["risk_features"])
+        self.assertIn("many_domain_hyphens", diagnostics["risk_features"])
 
 
 if __name__ == "__main__":

@@ -111,6 +111,12 @@ BRAND_NAMES_LEV = [
     "chase","wellsfargo","bankofamerica","dropbox","github","steam"
 ]
 
+SUSPICIOUS_URL_TERMS = {
+    "login", "verify", "secure", "account", "update", "confirm", "banking",
+    "password", "credential", "suspended", "unlock", "reactivate", "billing",
+    "signin", "wallet", "validate", "kyc"
+}
+
 class URLRequest(BaseModel):
     url: str
 
@@ -184,11 +190,16 @@ def calibrate_ml_score(ml_score: float, has_positive_rules: bool) -> float:
         return ml_score * 0.5
     return ml_score
 
-def has_trust_conflict(vt, gsb, typo, adv, phash, dom, image) -> bool:
+def has_trust_conflict(vt, gsb, typo, adv, phash, dom, image,
+                       domain_similarity=None, attack_patterns=None) -> bool:
+    domain_similarity = domain_similarity or {}
+    attack_patterns = attack_patterns or {}
     return (
         (vt.get("vt_checked") and vt.get("vt_malicious", 0) > 0) or
         bool(gsb.get("gsb_match")) or
         bool(typo.get("is_typosquat")) or
+        bool(domain_similarity.get("suspicious")) or
+        bool(attack_patterns.get("patterns")) or
         bool(phash.get("is_clone") and phash.get("brand")) or
         bool(adv.get("has_homoglyph")) or
         bool(adv.get("is_cloud_hosted") and adv.get("cloud_suspicious")) or
@@ -240,6 +251,77 @@ def trusted_domain_delta(
 def arbitrate_score(ml_score: float, positive_rule_score: float, trust_delta: float) -> float:
     return clamp_score(ml_score + positive_rule_score + trust_delta)
 
+def bound_positive_rule_score(score: float) -> float:
+    return min(round(score, 1), 75.0)
+
+def diagnose_lexical_feature_risk(url: str, features: dict, adv: dict) -> dict:
+    url_lower = normalize_url(url).lower()
+    keyword_hits = sorted(term for term in SUSPICIOUS_URL_TERMS if term in url_lower)
+    risky = []
+
+    if keyword_hits:
+        risky.append("suspicious_keywords")
+    if adv.get("subdomain_depth", 0) >= 3:
+        risky.append("deep_subdomain")
+    if features.get("length_url", 0) >= 90:
+        risky.append("long_url")
+    if features.get("domain_length", 0) >= 28:
+        risky.append("long_domain")
+    if features.get("qty_hyphen_domain", 0) >= 2:
+        risky.append("many_domain_hyphens")
+    if adv.get("keyword_count", 0) >= 2:
+        risky.append("keyword_density")
+
+    return {
+        "keyword_hits": keyword_hits,
+        "subdomain_depth": adv.get("subdomain_depth", 0),
+        "url_length": features.get("length_url", 0),
+        "domain_length": features.get("domain_length", 0),
+        "domain_hyphens": features.get("qty_hyphen_domain", 0),
+        "keyword_count": adv.get("keyword_count", 0),
+        "risk_features": risky,
+    }
+
+def classify_attack_pattern(url: str, features: dict, adv: dict, typo: dict,
+                            domain_similarity: dict, dom: dict, phash: dict) -> dict:
+    patterns = []
+
+    if domain_similarity.get("suspicious") or typo.get("is_typosquat") or adv.get("has_homoglyph"):
+        patterns.append("brand_impersonation")
+    if adv.get("has_unicode") or adv.get("has_homoglyph"):
+        patterns.append("homoglyph_spoofing")
+    if adv.get("is_cloud_hosted") and adv.get("cloud_suspicious"):
+        patterns.append("cloud_hosted_phishing")
+    if adv.get("has_ip_in_domain"):
+        patterns.append("ip_obfuscation")
+    if dom.get("has_login_form") and dom.get("form_action_mismatch"):
+        patterns.append("credential_harvesting")
+    if phash.get("is_clone") and phash.get("brand"):
+        patterns.append("visual_brand_clone")
+
+    url_lower = normalize_url(url).lower()
+    credential_terms = {"login", "signin", "password", "credential", "account"}
+    verification_terms = {"verify", "confirm", "update", "secure", "unlock", "reactivate", "kyc"}
+    if any(t in url_lower for t in credential_terms) and any(t in url_lower for t in verification_terms):
+        patterns.append("credential_lure_url")
+
+    if features.get("qty_redirects", 0) >= 2 or features.get("url_shortened", 0):
+        patterns.append("redirect_abuse")
+
+    unique_patterns = sorted(set(patterns))
+    score = min(len(unique_patterns) * 12.0, 35.0)
+    severe = any(p in unique_patterns for p in [
+        "credential_harvesting", "visual_brand_clone", "brand_impersonation", "homoglyph_spoofing"
+    ])
+    if severe:
+        score = max(score, 20.0)
+
+    return {
+        "patterns": unique_patterns,
+        "score": score,
+        "classifier": "deterministic_attack_pattern_v1",
+    }
+
 def levenshtein(s1: str, s2: str) -> int:
     if len(s1) < len(s2):
         return levenshtein(s2, s1)
@@ -253,10 +335,80 @@ def levenshtein(s1: str, s2: str) -> int:
         prev = curr
     return prev[-1]
 
+def normalize_brand_text(value: str) -> str:
+    replacements = {
+        "0": "o", "1": "l", "3": "e", "4": "a", "5": "s",
+        "6": "g", "7": "t", "8": "b", "@": "a", "!": "i",
+    }
+    normalized = value.lower()
+    for fake, real in replacements.items():
+        normalized = normalized.replace(fake, real)
+    return re.sub(r"[^a-z0-9]", "", normalized)
+
+def char_ngrams(value: str, size: int = 2) -> set[str]:
+    if len(value) <= size:
+        return {value}
+    return {value[i:i + size] for i in range(len(value) - size + 1)}
+
+def ngram_similarity(left: str, right: str) -> float:
+    left_grams = char_ngrams(left)
+    right_grams = char_ngrams(right)
+    if not left_grams or not right_grams:
+        return 0.0
+    return len(left_grams & right_grams) / len(left_grams | right_grams)
+
+def domain_similarity_check(url: str) -> dict:
+    ext = TLD_EXTRACTOR(normalize_url(url))
+    hostname = hostname_from_url(url)
+    domain = ext.domain.lower()
+    normalized_domain = normalize_brand_text(domain)
+    trusted_match = trust_match_for_hostname(hostname)
+
+    best = {
+        "suspicious": False,
+        "brand": None,
+        "reason": None,
+        "distance": 99,
+        "similarity": 0.0,
+        "boost": 0.0,
+    }
+    if trusted_match or len(normalized_domain) < 3:
+        return best
+
+    domain_tokens = [t for t in re.split(r"[^a-z0-9]+", domain) if t]
+    for brand in BRAND_NAMES_LEV:
+        normalized_brand = normalize_brand_text(brand)
+        distance = levenshtein(normalized_domain, normalized_brand)
+        similarity = ngram_similarity(normalized_domain, normalized_brand)
+        reason = None
+
+        if brand in domain_tokens or brand in normalized_domain:
+            reason = "brand term in untrusted domain"
+        elif distance <= 1:
+            reason = "near brand edit distance"
+        elif len(normalized_brand) >= 5 and distance <= 2 and similarity >= 0.45:
+            reason = "brand lookalike edit distance"
+        elif similarity >= 0.72:
+            reason = "brand ngram similarity"
+
+        if reason:
+            boost = 30.0 if distance <= 1 else 25.0
+            if boost > best["boost"]:
+                best = {
+                    "suspicious": True,
+                    "brand": brand,
+                    "reason": reason,
+                    "distance": distance,
+                    "similarity": round(similarity, 3),
+                    "boost": boost,
+                }
+
+    return best
+
 def check_typosquatting(url: str) -> dict:
     ext     = TLD_EXTRACTOR(normalize_url(url))
     domain  = ext.domain.lower()
-    if len(domain) < 4:
+    if len(domain) < 3:
         return {"is_typosquat": False, "closest_brand": None, "distance": 99}
     min_dist = min(levenshtein(domain, brand) for brand in BRAND_NAMES_LEV)
     closest  = min(BRAND_NAMES_LEV, key=lambda b: levenshtein(domain, b))
@@ -445,11 +597,14 @@ async def check_phash(url: str) -> dict:
         pass
     return {"is_clone": False, "brand": None, "distance": None}
 
-def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None, fast=None, img=None, dom=None) -> list:
+def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None, fast=None,
+                img=None, dom=None, domain_similarity=None, attack_patterns=None) -> list:
     adv  = adv or {}
     fast = fast or {}
     img  = img or {}
     dom  = dom or {}
+    domain_similarity = domain_similarity or {}
+    attack_patterns = attack_patterns or {}
     signals = []
     ext = TLD_EXTRACTOR(normalize_url(url))
     if ext.suffix and ext.suffix.split(".")[-1] in RISKY_TLDS:
@@ -474,6 +629,13 @@ def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None, fast=None,
         signals.append(f"Visual clone of {phash['brand'].upper()} detected")
     if typo.get("is_typosquat"):
         signals.append(f"Typosquatting: resembles {typo['closest_brand']} (distance {typo['distance']})")
+    if domain_similarity.get("suspicious"):
+        signals.append(
+            f"Brand lookalike: resembles {domain_similarity.get('brand')} "
+            f"({domain_similarity.get('reason')})"
+        )
+    if attack_patterns.get("patterns"):
+        signals.append(f"Attack pattern: {attack_patterns['patterns'][0].replace('_', ' ')}")
     if adv.get("has_unicode"):
         signals.append("Unicode/Cyrillic homoglyph domain detected")
     elif adv.get("has_homoglyph"):
@@ -591,6 +753,11 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     nlp_prob = nlp_score(page_text)
     typo     = check_typosquatting(url)
     adv      = extract_advanced_features(url)
+    domain_similarity = domain_similarity_check(url)
+    feature_diagnostics = diagnose_lexical_feature_risk(url, features, adv)
+    attack_patterns = classify_attack_pattern(
+        url, features, adv, typo, domain_similarity, dom_result, phash_result
+    )
 
     ml_score    = ensemble_prob * 100
     vt_boost    = 0.0
@@ -598,6 +765,8 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     phash_boost = 0.0
     gsb_boost   = 0.0
     typo_boost  = 0.0
+    similarity_boost = 0.0
+    attack_boost = 0.0
     adv_boost   = 0.0
 
     if vt["vt_checked"] and vt["vt_total"] > 0:
@@ -635,6 +804,11 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     if typo.get("is_typosquat"):
         typo_boost = 25.0
 
+    if domain_similarity.get("suspicious"):
+        similarity_boost = domain_similarity.get("boost", 25.0)
+
+    attack_boost = attack_patterns.get("score", 0.0)
+
     if adv.get("has_homoglyph"):
         adv_boost += 30.0
     if adv.get("is_cloud_hosted") and adv.get("cloud_suspicious"):
@@ -645,13 +819,18 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
         adv_boost += 35.0
     adv_boost = min(adv_boost, 50.0)
 
-    positive_rule_score = (
+    positive_rule_score_raw = (
         vt_boost + nlp_boost + phash_boost + gsb_boost +
-        typo_boost + adv_boost + image_boost + dom_boost
+        typo_boost + similarity_boost + attack_boost +
+        adv_boost + image_boost + dom_boost
     )
+    positive_rule_score = bound_positive_rule_score(positive_rule_score_raw)
     has_positive_rules = positive_rule_score > 0
     calibrated_ml_score = calibrate_ml_score(ml_score, has_positive_rules)
-    trust_conflict = has_trust_conflict(vt, gsb, typo, adv, phash_result, dom_result, image_result)
+    trust_conflict = has_trust_conflict(
+        vt, gsb, typo, adv, phash_result, dom_result, image_result,
+        domain_similarity, attack_patterns
+    )
     trusted_candidate = trust_match_for_hostname(hostname)
     tls_validation = (
         await validate_tls_certificate(hostname)
@@ -666,7 +845,10 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     )
 
     score = arbitrate_score(calibrated_ml_score, positive_rule_score, trust_delta)
-    signals = get_signals(url, score, vt, nlp_prob, phash_result, gsb, typo, adv, fast_result, image_result, dom_result)
+    signals = get_signals(
+        url, score, vt, nlp_prob, phash_result, gsb, typo, adv, fast_result,
+        image_result, dom_result, domain_similarity, attack_patterns
+    )
 
     verdict, ttl = verdict_for_score(score)
 
@@ -699,6 +881,7 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             "xgb_score":           round(xgb_prob * 100, 1),
             "ml_score_raw":         round(ensemble_prob * 100, 1),
             "ml_score_calibrated":  round(calibrated_ml_score, 1),
+            "positive_rule_score_raw": round(positive_rule_score_raw, 1),
             "positive_rule_score":  round(positive_rule_score, 1),
             "trusted_domain_match": trusted_match,
             "trust_delta":          round(trust_delta, 1),
@@ -720,6 +903,12 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             "typosquat":           typo.get("is_typosquat", False),
             "typo_brand":          typo.get("closest_brand"),
             "typo_boost":          typo_boost,
+            "domain_similarity":   domain_similarity,
+            "similarity_boost":    round(similarity_boost, 1),
+            "attack_patterns":     attack_patterns.get("patterns", []),
+            "attack_classifier":   attack_patterns.get("classifier"),
+            "attack_boost":        round(attack_boost, 1),
+            "lexical_diagnostics": feature_diagnostics,
             "homoglyph":           bool(adv.get("has_homoglyph", False)),
             "unicode_spoof":       bool(adv.get("has_unicode", False)),
             "cloud_hosted":        bool(adv.get("is_cloud_hosted", False)),
