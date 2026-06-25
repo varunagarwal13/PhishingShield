@@ -102,6 +102,18 @@ CLOUD_SUBDOMAINS = {
     "blogspot.com", "wordpress.com",
 }
 
+LEGITIMATE_INFRASTRUCTURE_DOMAINS = {
+    "googleapis.com", "gstatic.com", "googleusercontent.com", "goog",
+    "doubleclick.net", "googlesyndication.com", "google-analytics.com",
+    "googlezip.net", "adtrafficquality.google",
+    "office365.com", "office.com", "office.net", "sharepoint.com",
+    "microsoft.com", "microsoftonline.com", "cloud.microsoft",
+    "static.microsoft", "msftncsi.com", "windowsupdate.com", "apple-dns.net",
+    "icloud.com", "fastly.net", "fastly-edge.com", "sentry.io", "azurefd.net",
+    "azureedge.net", "cloudflare.com", "cloudflareinsights.com",
+    "digicert.com", "appsflyersdk.com", "facebook.net",
+}
+
 RISKY_TLDS = {"tk","ml","ga","cf","gq","top","xyz","club","online","site",
               "work","party","live","click","link","win","loan","download"}
 
@@ -173,6 +185,16 @@ def is_trusted_hostname(hostname: str) -> bool:
 def is_cloud_hostname(hostname: str) -> bool:
     return any(host_matches_domain(hostname, cloud_domain) for cloud_domain in CLOUD_SUBDOMAINS)
 
+def infrastructure_match_for_hostname(hostname: str) -> str | None:
+    hostname = hostname.lower().rstrip(".")
+    for infra_domain in sorted(LEGITIMATE_INFRASTRUCTURE_DOMAINS, key=len, reverse=True):
+        if host_matches_domain(hostname, infra_domain):
+            return infra_domain
+    return None
+
+def is_legitimate_infrastructure_hostname(hostname: str) -> bool:
+    return infrastructure_match_for_hostname(hostname) is not None
+
 def verdict_for_score(score: float) -> tuple[str, int]:
     if score >= 90:
         return "BLOCK", 86400
@@ -201,7 +223,7 @@ def has_trust_conflict(vt, gsb, typo, adv, phash, dom, image,
         bool(domain_similarity.get("suspicious")) or
         bool(attack_patterns.get("patterns")) or
         bool(phash.get("is_clone") and phash.get("brand")) or
-        bool(adv.get("has_homoglyph")) or
+        bool(adv.get("has_unicode")) or
         bool(adv.get("is_cloud_hosted") and adv.get("cloud_suspicious")) or
         bool(adv.get("has_ip_in_domain")) or
         bool(image.get("qr_url_flagged")) or
@@ -248,8 +270,28 @@ def trusted_domain_delta(
         return -25.0, trusted_match
     return -10.0, trusted_match
 
-def arbitrate_score(ml_score: float, positive_rule_score: float, trust_delta: float) -> float:
-    return clamp_score(ml_score + positive_rule_score + trust_delta)
+def infrastructure_domain_delta(hostname: str, has_conflict: bool) -> tuple[float, str | None]:
+    infra_match = infrastructure_match_for_hostname(hostname)
+    if not infra_match or has_conflict:
+        return 0.0, infra_match
+    return -45.0, infra_match
+
+def arbitrate_score(ml_score: float, positive_rule_score: float, trust_delta: float,
+                    infra_delta: float = 0.0) -> float:
+    return clamp_score(ml_score + positive_rule_score + trust_delta + infra_delta)
+
+def apply_low_conflict_domain_cap(score: float, trusted_match: str | None,
+                                  infrastructure_match: str | None,
+                                  trust_conflict: bool,
+                                  infrastructure_conflict: bool) -> tuple[float, float | None]:
+    cap = None
+    if trusted_match and not trust_conflict:
+        cap = 65.0
+    elif infrastructure_match and not infrastructure_conflict:
+        cap = 65.0
+    if cap is None:
+        return score, None
+    return clamp_score(min(score, cap)), cap
 
 def bound_positive_rule_score(score: float) -> float:
     return min(round(score, 1), 75.0)
@@ -286,11 +328,12 @@ def classify_attack_pattern(url: str, features: dict, adv: dict, typo: dict,
                             domain_similarity: dict, dom: dict, phash: dict) -> dict:
     patterns = []
 
-    if domain_similarity.get("suspicious") or typo.get("is_typosquat") or adv.get("has_homoglyph"):
+    if domain_similarity.get("suspicious") or typo.get("is_typosquat") or adv.get("has_unicode"):
         patterns.append("brand_impersonation")
-    if adv.get("has_unicode") or adv.get("has_homoglyph"):
+    if adv.get("has_unicode"):
         patterns.append("homoglyph_spoofing")
-    if adv.get("is_cloud_hosted") and adv.get("cloud_suspicious"):
+    if (adv.get("is_cloud_hosted") and adv.get("cloud_suspicious") and
+            not is_legitimate_infrastructure_hostname(hostname_from_url(url))):
         patterns.append("cloud_hosted_phishing")
     if adv.get("has_ip_in_domain"):
         patterns.append("ip_obfuscation")
@@ -363,6 +406,7 @@ def domain_similarity_check(url: str) -> dict:
     domain = ext.domain.lower()
     normalized_domain = normalize_brand_text(domain)
     trusted_match = trust_match_for_hostname(hostname)
+    infra_match = infrastructure_match_for_hostname(hostname)
 
     best = {
         "suspicious": False,
@@ -372,7 +416,7 @@ def domain_similarity_check(url: str) -> dict:
         "similarity": 0.0,
         "boost": 0.0,
     }
-    if trusted_match or len(normalized_domain) < 3:
+    if trusted_match or infra_match or len(normalized_domain) < 3:
         return best
 
     domain_tokens = [t for t in re.split(r"[^a-z0-9]+", domain) if t]
@@ -410,9 +454,13 @@ def check_typosquatting(url: str) -> dict:
     domain  = ext.domain.lower()
     if len(domain) < 3:
         return {"is_typosquat": False, "closest_brand": None, "distance": 99}
-    min_dist = min(levenshtein(domain, brand) for brand in BRAND_NAMES_LEV)
-    closest  = min(BRAND_NAMES_LEV, key=lambda b: levenshtein(domain, b))
-    is_typo  = 0 < min_dist <= 2
+    distances = {brand: levenshtein(domain, brand) for brand in BRAND_NAMES_LEV}
+    closest = min(BRAND_NAMES_LEV, key=lambda b: distances[b])
+    min_dist = distances[closest]
+    if len(closest) <= 3:
+        is_typo = 0 < min_dist <= 1 and domain[:1] == closest[:1]
+    else:
+        is_typo = 0 < min_dist <= 2
     return {"is_typosquat": is_typo, "closest_brand": closest, "distance": min_dist}
 
 def extract_features(url: str) -> dict:
@@ -613,7 +661,8 @@ def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None, fast=None,
         signals.append("IP address as domain")
     if any(w in url.lower() for w in ["verify","secure","confirm","credential","suspend"]):
         signals.append("Suspicious keywords in URL")
-    if any(b in ext.domain.lower() for b in ["paypal","microsoft","apple","amazon","google"]):
+    if (not is_legitimate_infrastructure_hostname(hostname_from_url(url)) and
+            any(b in ext.domain.lower() for b in ["paypal","microsoft","apple","amazon","google"])):
         signals.append("Brand name in unknown domain")
     if "@" in url:
         signals.append("@ symbol in URL")
@@ -636,11 +685,16 @@ def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None, fast=None,
         )
     if attack_patterns.get("patterns"):
         signals.append(f"Attack pattern: {attack_patterns['patterns'][0].replace('_', ' ')}")
+    digit_brand_spoof = adv.get("has_digit_homoglyph") and (
+        domain_similarity.get("suspicious") or typo.get("is_typosquat")
+    )
+
     if adv.get("has_unicode"):
         signals.append("Unicode/Cyrillic homoglyph domain detected")
-    elif adv.get("has_homoglyph"):
+    elif digit_brand_spoof:
         signals.append("Character substitution homoglyph detected")
-    if adv.get("is_cloud_hosted") and adv.get("cloud_suspicious"):
+    if (adv.get("is_cloud_hosted") and adv.get("cloud_suspicious") and
+            not is_legitimate_infrastructure_hostname(hostname_from_url(url))):
         signals.append("Suspicious content hosted on cloud platform")
     if adv.get("is_high_entropy"):
         signals.append("High domain randomness (AI-generated pattern)")
@@ -830,9 +884,14 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
 
     attack_boost = attack_patterns.get("score", 0.0)
 
-    if adv.get("has_homoglyph"):
+    digit_brand_spoof = adv.get("has_digit_homoglyph") and (
+        domain_similarity.get("suspicious") or typo.get("is_typosquat")
+    )
+
+    if adv.get("has_unicode") or digit_brand_spoof:
         adv_boost += 30.0
-    if adv.get("is_cloud_hosted") and adv.get("cloud_suspicious"):
+    if (adv.get("is_cloud_hosted") and adv.get("cloud_suspicious") and
+            not is_legitimate_infrastructure_hostname(hostname)):
         adv_boost += 30.0
     if adv.get("is_high_entropy") or adv.get("is_low_vowel"):
         adv_boost += 15.0
@@ -864,8 +923,22 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
         tls_validation,
         urlparse(url).scheme,
     )
+    infra_conflict = (
+        (vt.get("vt_checked") and vt.get("vt_malicious", 0) > 0) or
+        bool(gsb.get("gsb_match")) or
+        bool(dom_result.get("has_login_form") and dom_result.get("form_action_mismatch")) or
+        bool(phash_result.get("is_clone") and phash_result.get("brand"))
+    )
+    infra_delta, infrastructure_match = infrastructure_domain_delta(hostname, infra_conflict)
 
-    score = arbitrate_score(calibrated_ml_score, positive_rule_score, trust_delta)
+    score = arbitrate_score(calibrated_ml_score, positive_rule_score, trust_delta, infra_delta)
+    score, low_conflict_domain_cap = apply_low_conflict_domain_cap(
+        score,
+        trusted_match,
+        infrastructure_match,
+        trust_conflict,
+        infra_conflict,
+    )
     signals = get_signals(
         url, score, vt, nlp_prob, phash_result, gsb, typo, adv, fast_result,
         image_result, dom_result, domain_similarity, attack_patterns
@@ -907,6 +980,9 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
             "trusted_domain_match": trusted_match,
             "trust_delta":          round(trust_delta, 1),
             "trust_conflict":       bool(trust_conflict),
+            "infrastructure_match": infrastructure_match,
+            "infrastructure_delta": round(infra_delta, 1),
+            "low_conflict_domain_cap": low_conflict_domain_cap,
             "tls_checked":          bool(tls_validation.get("checked")),
             "tls_valid":            bool(tls_validation.get("valid")),
             "tls_issuer":           tls_validation.get("issuer"),

@@ -81,6 +81,95 @@ class SecurityImprovementTests(unittest.TestCase):
         self.assertEqual(main.bound_positive_rule_score(150.0), 75.0)
         self.assertEqual(main.arbitrate_score(40.0, 75.0, -10.0), 100.0)
 
+    def test_legitimate_infrastructure_domains_are_not_brand_spoofs(self):
+        urls = [
+            "https://update.googleapis.com",
+            "https://office365.com",
+            "https://outlook.office365.com",
+            "https://pki.goog",
+            "https://lh3.googleusercontent.com",
+            "https://dns.msftncsi.com",
+            "https://gateway.fe2.apple-dns.net",
+            "https://ep2.adtrafficquality.google",
+            "https://appsflyersdk.com",
+            "https://global.aa-rt.sharepoint.com",
+            "https://tpc.googlesyndication.com",
+            "https://public.onecdn.static.microsoft",
+            "https://google.fastly-edge.com",
+            "https://static.cloudflareinsights.com",
+            "https://edge-consumer-static.azureedge.net",
+            "https://www.google-analytics.com",
+        ]
+
+        for url in urls:
+            with self.subTest(url=url):
+                host = main.hostname_from_url(url)
+                self.assertTrue(main.is_legitimate_infrastructure_hostname(host))
+                self.assertFalse(main.domain_similarity_check(url)["suspicious"])
+
+    def test_short_unrelated_domain_is_not_typosquatting_sbi(self):
+        typo = main.check_typosquatting("https://pki.goog")
+
+        self.assertFalse(typo["is_typosquat"])
+        self.assertEqual(typo["closest_brand"], "sbi")
+
+    def test_digit_heavy_random_domain_is_not_homoglyph_attack_without_brand_similarity(self):
+        attack = main.classify_attack_pattern(
+            "https://7kc7orgms5ahc.io/docs",
+            {"qty_redirects": 0, "url_shortened": 0},
+            {"has_homoglyph": 1, "has_unicode": 0},
+            {"is_typosquat": False},
+            {"suspicious": False},
+            {},
+            {},
+        )
+
+        self.assertNotIn("brand_impersonation", attack["patterns"])
+        self.assertNotIn("homoglyph_spoofing", attack["patterns"])
+
+    def test_infrastructure_delta_is_stronger_when_no_conflict(self):
+        delta, match = main.infrastructure_domain_delta("update.googleapis.com", False)
+
+        self.assertEqual(match, "googleapis.com")
+        self.assertEqual(delta, -45.0)
+
+    def test_low_conflict_trusted_domain_is_capped_to_monitor(self):
+        score, cap = main.apply_low_conflict_domain_cap(
+            91.0,
+            "hdfcbank.com",
+            None,
+            trust_conflict=False,
+            infrastructure_conflict=False,
+        )
+
+        self.assertEqual(score, 65.0)
+        self.assertEqual(cap, 65.0)
+
+    def test_low_conflict_cap_does_not_apply_when_trust_conflict_exists(self):
+        score, cap = main.apply_low_conflict_domain_cap(
+            91.0,
+            "hdfcbank.com",
+            None,
+            trust_conflict=True,
+            infrastructure_conflict=False,
+        )
+
+        self.assertEqual(score, 91.0)
+        self.assertIsNone(cap)
+
+    def test_legitimate_infrastructure_cloud_signal_is_suppressed_without_hard_conflict(self):
+        attack = main.classify_attack_pattern(
+            "https://lh3.googleusercontent.com",
+            {"qty_redirects": 0, "url_shortened": 0},
+            {"is_cloud_hosted": 1, "cloud_suspicious": 1},
+            {"is_typosquat": False},
+            {"suspicious": False},
+            {},
+            {},
+        )
+
+        self.assertNotIn("cloud_hosted_phishing", attack["patterns"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
