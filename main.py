@@ -28,6 +28,7 @@ GSB_API_KEY = os.getenv("GSB_API_KEY", "")
 REDIS_URL   = os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
 
 app = FastAPI(title="Phishing Detector API v8")
+TLD_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None)
 
 @app.on_event("startup")
 def startup():
@@ -67,7 +68,10 @@ def load_trusted_domains():
         "pypi.org","npmjs.com","medium.com","dev.to","gitlab.com",
         "bitbucket.org","heroku.com","digitalocean.com","stripe.com",
         "notion.so","figma.com","slack.com","zoom.us","dropbox.com","x.com",
-        "flipkart.com","irctc.co.in","naukri.com","indianexpress.com"
+        "flipkart.com","irctc.co.in","naukri.com","indianexpress.com",
+        "sbi.bank.in","onlinesbi.sbi.bank.in","retail.sbi.bank.in",
+        "hdfcbank.com","icicibank.com","axisbank.com","kotak.com",
+        "paytm.com","microsoftonline.com"
     }
     try:
         with open("alexa_top10k.txt", "r") as f:
@@ -129,6 +133,45 @@ def domain_cache_key(domain: str) -> str:
 def negative_cache_key(url: str) -> str:
     return f"phish8:neg:{hashlib.md5(url.encode()).hexdigest()}"
 
+def normalize_url(url: str) -> str:
+    url = url.strip()
+    if not re.match(r"^[a-z][a-z0-9+.-]*://", url, re.I):
+        return f"https://{url}"
+    return url
+
+def hostname_from_url(url: str) -> str:
+    parsed = urlparse(normalize_url(url))
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if hostname.startswith("www."):
+        hostname = hostname[4:]
+    return hostname
+
+def registered_domain_from_host(hostname: str) -> str:
+    ext = TLD_EXTRACTOR(hostname)
+    if not ext.suffix:
+        return ext.domain.lower()
+    return f"{ext.domain}.{ext.suffix}".lower()
+
+def host_matches_domain(hostname: str, trusted_domain: str) -> bool:
+    hostname = hostname.lower().rstrip(".")
+    trusted_domain = trusted_domain.lower().rstrip(".")
+    return hostname == trusted_domain or hostname.endswith(f".{trusted_domain}")
+
+def is_trusted_hostname(hostname: str) -> bool:
+    return any(host_matches_domain(hostname, trusted) for trusted in TRUSTED_DOMAINS)
+
+def is_cloud_hostname(hostname: str) -> bool:
+    return any(host_matches_domain(hostname, cloud_domain) for cloud_domain in CLOUD_SUBDOMAINS)
+
+def verdict_for_score(score: float) -> tuple[str, int]:
+    if score >= 90:
+        return "BLOCK", 86400
+    if score >= 70:
+        return "WARN", 3600
+    if score >= 40:
+        return "MONITOR", 3600
+    return "ALLOW", 3600
+
 def levenshtein(s1: str, s2: str) -> int:
     if len(s1) < len(s2):
         return levenshtein(s2, s1)
@@ -143,7 +186,7 @@ def levenshtein(s1: str, s2: str) -> int:
     return prev[-1]
 
 def check_typosquatting(url: str) -> dict:
-    ext     = tldextract.extract(url)
+    ext     = TLD_EXTRACTOR(normalize_url(url))
     domain  = ext.domain.lower()
     if len(domain) < 4:
         return {"is_typosquat": False, "closest_brand": None, "distance": 99}
@@ -154,8 +197,9 @@ def check_typosquatting(url: str) -> dict:
 
 def extract_features(url: str) -> dict:
     try:
+        url        = normalize_url(url)
         parsed     = urlparse(url)
-        ext        = tldextract.extract(url)
+        ext        = TLD_EXTRACTOR(url)
         domain     = f"{ext.domain}.{ext.suffix}" if ext.suffix else ext.domain
         path       = parsed.path or ""
         params     = parsed.query or ""
@@ -200,7 +244,7 @@ def extract_features(url: str) -> dict:
         features["qty_nameservers"]         = -1
         features["qty_mx_servers"]          = -1
         features["ttl_hostname"]            = -1
-        features["tls_ssl_certificate"]     = int(url.startswith("https"))
+        features["tls_ssl_certificate"]     = int(parsed.scheme == "https")
         features["qty_redirects"]           = 0
         features["url_google_index"]        = -1
         features["domain_google_index"]     = -1
@@ -215,6 +259,7 @@ def extract_features(url: str) -> dict:
 
 async def fetch_page_text(url: str) -> str:
     try:
+        url = normalize_url(url)
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 url,
@@ -246,6 +291,7 @@ async def check_virustotal(url: str, stop_event: asyncio.Event = None) -> dict:
     if not VT_API_KEY:
         return {"vt_malicious": 0, "vt_total": 0, "vt_checked": False}
     try:
+        url = normalize_url(url)
         url_id  = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
         headers = {"x-apikey": VT_API_KEY}
         async with aiohttp.ClientSession() as session:
@@ -284,6 +330,7 @@ async def check_google_safe_browsing(url: str) -> dict:
     if not GSB_API_KEY:
         return {"gsb_match": False, "threat_type": None}
     try:
+        url = normalize_url(url)
         payload = {
             "client": {"clientId": "phishing-detector", "clientVersion": "1.0"},
             "threatInfo": {
@@ -317,6 +364,7 @@ async def check_google_safe_browsing(url: str) -> dict:
 
 async def check_phash(url: str) -> dict:
     try:
+        url = normalize_url(url)
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 "http://127.0.0.1:8001/check",
@@ -335,7 +383,7 @@ def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None, fast=None,
     img  = img or {}
     dom  = dom or {}
     signals = []
-    ext = tldextract.extract(url)
+    ext = TLD_EXTRACTOR(normalize_url(url))
     if ext.suffix and ext.suffix.split(".")[-1] in RISKY_TLDS:
         signals.append("Suspicious TLD")
     if re.match(r"^\d+\.\d+\.\d+\.\d+$", ext.domain):
@@ -346,7 +394,7 @@ def get_signals(url, score, vt, nlp_prob, phash, gsb, typo, adv=None, fast=None,
         signals.append("Brand name in unknown domain")
     if "@" in url:
         signals.append("@ symbol in URL")
-    if not url.startswith("https"):
+    if urlparse(normalize_url(url)).scheme != "https":
         signals.append("No HTTPS")
     if vt["vt_checked"] and vt["vt_malicious"] > 0:
         signals.append(f"VirusTotal: {vt['vt_malicious']}/{vt['vt_total']} engines flagged")
@@ -395,7 +443,7 @@ def root():
 
 @app.post("/check")
 async def check_url(request: URLRequest, db: Session = Depends(get_db)):
-    url = request.url.strip()
+    url = normalize_url(request.url)
     key = cache_key(url)
 
     try:
@@ -419,12 +467,11 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     except Exception as e:
         print(f"Negative cache read error: {e}")
 
-    ext               = tldextract.extract(url)
-    registered_domain = f"{ext.domain}.{ext.suffix}"
-    full_domain       = f"{ext.subdomain}.{registered_domain}" if ext.subdomain else registered_domain
-    is_cloud_subdomain = any(full_domain.endswith(c) for c in CLOUD_SUBDOMAINS)
+    hostname          = hostname_from_url(url)
+    registered_domain = registered_domain_from_host(hostname)
+    is_cloud_subdomain = is_cloud_hostname(hostname)
 
-    if registered_domain in TRUSTED_DOMAINS and not is_cloud_subdomain:
+    if is_trusted_hostname(hostname) and not is_cloud_subdomain:
         result = {
             "url": url, "score": 0.0, "verdict": "ALLOW",
             "signals": [], "cached": False,
@@ -571,15 +618,7 @@ async def check_url(request: URLRequest, db: Session = Depends(get_db)):
     ), 100.0)
     signals = get_signals(url, score, vt, nlp_prob, phash_result, gsb, typo, adv, fast_result, image_result, dom_result)
 
-    if score >= 70:
-        verdict = "BLOCK"
-        ttl     = 86400
-    elif score >= 40:
-        verdict = "WARN"
-        ttl     = 3600
-    else:
-        verdict = "ALLOW"
-        ttl     = 3600
+    verdict, ttl = verdict_for_score(score)
 
     try:
         log = ThreatLog(

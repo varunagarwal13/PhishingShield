@@ -27,6 +27,13 @@ CLOUD_PROVIDERS = [
 
 RISKY_TLDS = {"tk","ml","ga","cf","gq","top","xyz","club","online",
               "site","work","party","live","click","link","win","loan"}
+TLD_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None)
+
+def normalize_url(url):
+    url = url.strip()
+    if "://" not in url:
+        return f"https://{url}"
+    return url
 
 
 def shannon_entropy(s):
@@ -54,8 +61,9 @@ def levenshtein(s1, s2):
 
 def extract_advanced_features(url):
     try:
+        url         = normalize_url(url)
         parsed      = urlparse(url)
-        ext         = tldextract.extract(url)
+        ext         = TLD_EXTRACTOR(url)
         domain      = ext.domain.lower()
         suffix      = ext.suffix.lower()
         subdomain   = ext.subdomain.lower()
@@ -170,7 +178,7 @@ def extract_advanced_features(url):
             "keyword_count":         keyword_count,
             "tld_risky":             int(suffix.split('.')[-1] in RISKY_TLDS),
             "url_length":            len(url),
-            "has_https":             int(url.startswith("https")),
+            "has_https":             int(parsed.scheme == "https"),
         }
     except Exception as e:
         print(f"Error: {e}")
