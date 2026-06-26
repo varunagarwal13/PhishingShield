@@ -260,6 +260,8 @@ def nlp_score(text: str, app_state) -> float:
 
 
 async def check_virustotal(url: str) -> dict:
+    if not VT_API_KEY or os.getenv("SKIP_VT", "false").lower() == "true":
+        return {"vt_malicious": 0, "vt_total": 0, "vt_checked": False}
     if not VT_API_KEY:
         return {"vt_malicious": 0, "vt_total": 0, "vt_checked": False}
     try:
@@ -337,7 +339,7 @@ def root(request: Request):
 # Fix #3: /check protected by API key (enforced only when API_KEY env var is set)
 # Fix #11: rate limited to 30 requests/minute per IP
 @app.post("/check")
-@limiter.limit("30/minute")
+@limiter.limit("30/minute", exempt_when=lambda request: request.client.host in ("127.0.0.1", "::1"))
 async def check_url(
     url_request: URLRequest,
     request: Request,
