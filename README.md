@@ -43,34 +43,6 @@ API docs available at **http://localhost:8000/docs**
 
 ---
 
-## Modernized architecture
-
-The legacy API remains compatible, and the production pipeline now also lives under the modular `app/` package:
-
-```text
-app/
-  api/          versioned routes, dependencies, request middleware
-  config/       settings, constants, structured logging
-  detectors/    plugin detectors with analyze/explain/health_check
-  pipeline/     async orchestration, weighted aggregation, explanations
-  services/     Redis/cache, VirusTotal, HTML, URL security, model integrity
-  schemas/      Pydantic v2 request, response, and detector schemas
-  database/     repository helpers for enriched detector persistence
-```
-
-New production routes:
-
-| Route | Description |
-|---|---|
-| `POST /api/v1/analyze` | Runs the async detector pipeline and returns detector explanations. |
-| `GET /api/v1/health` | Versioned health endpoint. |
-| `GET /api/v1/ready` | Readiness endpoint for models, Redis, and pipeline availability. |
-| `GET /api/v1/live` | Liveness endpoint. |
-
-Trusted domains are loaded from `trusted_domains.json` and can be reloaded by the URL security service without changing code. More architecture detail is in `docs/architecture.md`.
-
----
-
 ## Environment variables
 
 Copy `.env.example` to `.env` and fill in:

@@ -1,2 +1,0 @@
-"""Detector plugin implementations."""
-
