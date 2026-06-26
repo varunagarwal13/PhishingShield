@@ -10,6 +10,7 @@ tldextract
 sqlalchemy
 psycopg2-binary
 pydantic==2.13.4
+pydantic-settings
 beautifulsoup4
 python-whois
 dnspython
@@ -17,4 +18,8 @@ numpy
 Pillow
 pytesseract
 requests
-pyzbarslowapi
+pyzbar
+slowapi
+black
+isort
+ruff
