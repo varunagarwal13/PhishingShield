@@ -1,0 +1,101 @@
+url,score,verdict,signals,rf_score,xgb_score,vt_malicious,nlp_score,cached,error
+http://000ogwl.wcomhost.com/img/imager/png/customer_center/customer-IDPP00C378/myaccount/signin,100.0,BLOCK,No HTTPS | VirusTotal: 14/92 engines flagged,95.5,99.8,14,44.4,False,
+http://000ogwl.wcomhost.com/fasc/admin/customer_center/customer-IDPP00C963/myaccount/signin,100.0,BLOCK,No HTTPS | VirusTotal: 14/92 engines flagged,95.5,99.8,14,44.4,False,
+http://000p7l3.wcomhost.com/Ameli-Assurance/remboursement/login/iframe-page2.html,100.0,BLOCK,No HTTPS | VirusTotal: 13/92 engines flagged,93.0,98.7,13,44.4,False,
+http://000p7l3.wcomhost.com/Ameli-Assurance/remboursement/login/iframe-page3.html,100.0,BLOCK,No HTTPS | VirusTotal: 13/92 engines flagged,93.0,98.7,13,44.4,False,
+http://000ogxd.wcomhost.com/loggss/customer_center/customer-IDPP00C899/myaccount/signin,100.0,BLOCK,No HTTPS | VirusTotal: 13/92 engines flagged,95.0,99.8,13,44.4,False,
+http://000ogxd.wcomhost.com/logs/customer_center/customer-IDPP00C557/myaccount/signin,100.0,BLOCK,No HTTPS | VirusTotal: 13/92 engines flagged,95.0,99.8,13,44.4,False,
+http://000ogxd.wcomhost.com/logssss/customer_center/customer-IDPP00C196/myaccount/signin,100.0,BLOCK,No HTTPS | VirusTotal: 13/92 engines flagged,95.0,99.8,13,44.4,False,
+http://000p7l3.wcomhost.com/Ameli-Assurance/remboursement/login/iframe-page1.html,100.0,BLOCK,No HTTPS | VirusTotal: 14/92 engines flagged,93.0,98.7,14,44.4,False,
+http://000ogxd.wcomhost.com/loogs/customer_center/customer-IDPP00C844/myaccount/signin,100.0,BLOCK,No HTTPS | VirusTotal: 13/92 engines flagged,95.0,99.8,13,44.4,False,
+http://000ogxd.wcomhost.com/mass/customer_center/customer-IDPP00C384/myaccount/success,100.0,BLOCK,No HTTPS | VirusTotal: 13/92 engines flagged,94.5,99.8,13,44.4,False,
+http://000nt6r.wcomhost.com/suspension/home/check/valid/access,100.0,BLOCK,No HTTPS | VirusTotal: 14/92 engines flagged,93.0,99.7,14,44.4,False,
+http://000p8my.wcomhost.com/MobileFree/moncompte/609ece9f991062e8013222f292181b43,99.0,BLOCK,No HTTPS | VirusTotal: 14/92 engines flagged,90.0,98.8,14,44.4,False,
+http://000p8my.wcomhost.com/MobileFree/moncompte/0fb86c687f6cb25cbf1d9c191a2a123d,98.7,BLOCK,No HTTPS | VirusTotal: 13/92 engines flagged,90.0,98.8,13,44.4,False,
+http://000p8my.wcomhost.com/MobileFree/moncompte/725244d964b68f9fd56edc530811d354,98.7,BLOCK,No HTTPS | VirusTotal: 13/92 engines flagged,90.0,98.8,13,44.4,False,
+http://000p8my.wcomhost.com/MobileFree/moncompte/1e7fa6e7d7061724890964baebdc21ca,98.3,BLOCK,No HTTPS | VirusTotal: 12/92 engines flagged,90.0,98.8,12,44.4,False,
+http://000l34e.wcomhost.com/?fbclid=IwAR0bTLKRzZoi5OU7l2Jy29nIPaepITsvtkgGMXlTLwh8x-wn6Yj6mmFqRRU,96.1,BLOCK,No HTTPS | VirusTotal: 13/92 engines flagged,84.5,99.2,13,44.4,False,
+http://000m8ih.wcomhost.com/papa/98ed0/index_2.html,94.9,BLOCK,No HTTPS | VirusTotal: 15/92 engines flagged,82.5,97.6,15,44.4,False,
+http://000m8ih.wcomhost.com/papa/b6f27/index_2.html,94.9,BLOCK,No HTTPS | VirusTotal: 15/92 engines flagged,82.5,97.6,15,44.4,False,
+http://000m8ih.wcomhost.com/papa/c12e7/index_2.html,94.9,BLOCK,No HTTPS | VirusTotal: 15/92 engines flagged,82.5,97.6,15,44.4,False,
+http://000m8ih.wcomhost.com/papa/c4eed/index_2.html,94.9,BLOCK,No HTTPS | VirusTotal: 15/92 engines flagged,82.5,97.6,15,44.4,False,
+http://000m8ih.wcomhost.com/mama/0f78b/index_2.html,94.9,BLOCK,No HTTPS | VirusTotal: 15/92 engines flagged,82.5,97.6,15,44.4,False,
+http://000m8ih.wcomhost.com/mama/23a2c/index_2.html,94.9,BLOCK,No HTTPS | VirusTotal: 15/92 engines flagged,82.5,97.6,15,44.4,False,
+http://0.0.0fileserver.cryptonight.net,93.8,BLOCK,No HTTPS | VirusTotal: 13/92 engines flagged,81.5,97.6,13,61.0,False,
+http://0.0.0dbs.cryptonight.net,93.8,BLOCK,No HTTPS | VirusTotal: 14/92 engines flagged,81.5,96.9,14,61.0,False,
+http://0.0.0mail3.cryptonight.net,93.5,BLOCK,No HTTPS | VirusTotal: 12/92 engines flagged,82.0,97.2,12,61.0,False,
+http://0.0.0ns6.cryptonight.net,93.5,BLOCK,No HTTPS | VirusTotal: 13/92 engines flagged,81.5,96.9,13,61.0,False,
+http://0000000000c0.x9xcax2a.workers.dev,90.4,BLOCK,No HTTPS | VirusTotal: 13/92 engines flagged,77.5,94.8,13,42.0,False,
+http://00000000000000000update.emy.ba,90.3,BLOCK,No HTTPS | VirusTotal: 11/92 engines flagged,76.0,97.5,11,43.2,False,
+http://000ficohs99onli22.125mb.com,89.3,BLOCK,No HTTPS | VirusTotal: 14/92 engines flagged,76.5,93.0,14,0.0,False,
+http://000l.weebly.com,88.8,BLOCK,No HTTPS | VirusTotal: 12/92 engines flagged,78.1,91.7,12,41.9,False,
+http://000pbob.wcomhost.com/en-fr/systeme-,,ERROR,,,,,,,HTTP 429
+http://000m8ih.wcomhost.com/mama/53c3e/index_2.html,,ERROR,,,,,,,HTTP 429
+http://000ogxd.wcomhost.com/tops/customer_center/customer-IDPP00C176/myaccount/signin,,ERROR,,,,,,,HTTP 429
+http://000000000a0uutlook.weebly.com,,ERROR,,,,,,,HTTP 429
+http://000o2ba.wcomhost.com/mail/good/customer_center/customer-IDPP00C435/myaccount/signin,,ERROR,,,,,,,HTTP 429
+http://000pbox.wcomhost.com/Ameli-assurance/remboursement/login,,ERROR,,,,,,,HTTP 429
+http://000m8ih.wcomhost.com/mama/adee9/index_2.html,,ERROR,,,,,,,HTTP 429
+http://000ogxd.wcomhost.com/tops/customer_center/customer-IDPP00C266/myaccount/signin,,ERROR,,,,,,,HTTP 429
+http://000o2ba.wcomhost.com/mail/good/customer_center/customer-IDPP00C443/myaccount/signin,,ERROR,,,,,,,HTTP 429
+http://00000002.c1.biz,,ERROR,,,,,,,HTTP 429
+http://000pbox.wcomhost.com/Ameli-assurance/remboursement/login/iframe-page1.html,,ERROR,,,,,,,HTTP 429
+http://000m8ih.wcomhost.com/mama/c4fce/index_2.html,,ERROR,,,,,,,HTTP 429
+http://0000-1t8.pages.dev,,ERROR,,,,,,,HTTP 429
+http://000ogxd.wcomhost.com/trustme/customer_center/customer-IDPP00C849,,ERROR,,,,,,,HTTP 429
+http://000o5eh.wcomhost.com/admin/customer_center/customer-IDPP00C352/myaccount/signin/?locale.x=en_,,ERROR,,,,,,,HTTP 429
+http://000m8ih.wcomhost.com/nass1/072b7/index_2.html,,ERROR,,,,,,,HTTP 429
+http://0.0.0.0forum.cryptonight.net,,ERROR,,,,,,,HTTP 429
+http://000oiq3.wcomhost.com/drunk/customer_center/customer-IDPP00C374/myaccount/signin,,ERROR,,,,,,,HTTP 429
+http://000o5eh.wcomhost.com/logssss/customer_center/customer-IDPP00C332/myaccount/signin/?locale.x=en_,,ERROR,,,,,,,HTTP 429
+http://000m8ih.wcomhost.com/nass1/0dde4/index_2.html,,ERROR,,,,,,,HTTP 429
+http://000oiq3.wcomhost.com/GBTGNT24R4TTRH8TR5BHT5BHR5B5RT/TRGRTG5R1GVRF6V5G6R54GE6R5G4REG56ER/RTG5RTG15TG5TG15T4GRTG45TRG5RTG5/customer_center/customer-IDPP00C432/myaccount/signin,,ERROR,,,,,,,HTTP 429
+http://000o8dc.wcomhost.com/www.santanderbanco.es/bancosantander/es/particulares/Santander,,ERROR,,,,,,,HTTP 429
+http://0000h00003.byethost7.com/?i=1,,ERROR,,,,,,,HTTP 429
+http://000m8ih.wcomhost.com/nass1/19423/index_2.html,,ERROR,,,,,,,HTTP 429
+http://000p0d5.wcomhost.com/AmeliAssurance/remboursement/login/iframe-page1.html,,ERROR,,,,,,,HTTP 429
+http://0.0.0.0mailgate.cryptonight.net,,ERROR,,,,,,,HTTP 429
+http://000o8dc.wcomhost.com/www.santanderbanco.es/bancosantander/es/particulares/Santander/085a79cda16f5e151892fc6d32ab48ae/codigo_incorrecta.php,,ERROR,,,,,,,HTTP 429
+http://000m8ih.wcomhost.com/nass1/288f1/index_2.html,,ERROR,,,,,,,HTTP 429
+http://000p0dg.wcomhost.com/deadme/customer_center/customer-IDPP00C689/myaccount/signin,,ERROR,,,,,,,HTTP 429
+http://0.0.0.0ns10.cryptonight.net,,ERROR,,,,,,,HTTP 429
+http://000o8dc.wcomhost.com/www.santanderbanco.es/bancosantander/es/particulares/Santander/085a79cda16f5e151892fc6d32ab48ae/firma_electronica.php,,ERROR,,,,,,,HTTP 429
+http://000p0dg.wcomhost.com/homelucky/customer_center/customer-IDPP00C889/myaccount/signin/?locale.x=en_,,ERROR,,,,,,,HTTP 429
+http://000m8ih.wcomhost.com/nass1/36388/index_2.html,,ERROR,,,,,,,HTTP 429
+http://0.0.0.0ssl.cryptonight.net,,ERROR,,,,,,,HTTP 429
+http://000o8dc.wcomhost.com/www.santanderbanco.es/bancosantander/es/particulares/Santander/085a79cda16f5e151892fc6d32ab48ae/Mi_cuenta.php,,ERROR,,,,,,,HTTP 429
+http://000p4en.wcomhost.com/Ameli-Assurance/remboursement/login,,ERROR,,,,,,,HTTP 429
+http://000m8ih.wcomhost.com/nass1/44739/index_2.html,,ERROR,,,,,,,HTTP 429
+http://0000wa0outlook.weebly.com,,ERROR,,,,,,,HTTP 429
+http://000o8dc.wcomhost.com/www.santanderbanco.es/bancosantander/es/particulares/Santander/085a79cda16f5e151892fc6d32ab48ae/Phone_Number.php,,ERROR,,,,,,,HTTP 429
+http://000m8ih.wcomhost.com/nass1/575bd/index_2.html,,ERROR,,,,,,,HTTP 429
+http://000p4en.wcomhost.com/Ameli-Assurance/remboursement/login/iframe-page1.html,,ERROR,,,,,,,HTTP 429
+http://0001.353527440.workers.dev,,ERROR,,,,,,,HTTP 429
+http://000o8dc.wcomhost.com/www.santanderbanco.es/bancosantander/es/particulares/Santander/085a79cda16f5e151892fc6d32ab48ae/sms_codigo.php,,ERROR,,,,,,,HTTP 429
+http://000m8ih.wcomhost.com/nass1/a2554/index_2.html,,ERROR,,,,,,,HTTP 429
+http://0001home.webflow.io,,ERROR,,,,,,,HTTP 429
+http://000p4en.wcomhost.com/Ameli-Assurance/remboursement/login/iframe-page2.html,,ERROR,,,,,,,HTTP 429
+http://000o8dc.wcomhost.com/www.santanderbanco.es/bancosantander/es/particulares/Santander/584afb0ead7021795f04d7a317fe3b61,,ERROR,,,,,,,HTTP 429
+http://000p4en.wcomhost.com/Ameli-Assurance/remboursement/login/iframe-page3.html,,ERROR,,,,,,,HTTP 429
+http://000m8ih.wcomhost.com/nass1/b412b/index_2.html,,ERROR,,,,,,,HTTP 429
+http://0007854.atwebpages.com/desk/index.html,,ERROR,,,,,,,HTTP 429
+http://000o8dc.wcomhost.com/www.santanderbanco.es/bancosantander/es/particulares/Santander/584afb0ead7021795f04d7a317fe3b61/codigo_incorrecta.php,,ERROR,,,,,,,HTTP 429
+http://000p6vl.wcomhost.com/Ameli-Assurance/remboursement/login,,ERROR,,,,,,,HTTP 429
+http://000m8ih.wcomhost.com/nass1/bec05/index_2.html,,ERROR,,,,,,,HTTP 429
+http://000o8dc.wcomhost.com/www.santanderbanco.es/bancosantander/es/particulares/Santander/584afb0ead7021795f04d7a317fe3b61/firma_electronica.php,,ERROR,,,,,,,HTTP 429
+http://000811893962007154932393170597959432.hanefra7bikiemta.com,,ERROR,,,,,,,HTTP 429
+http://000p6vl.wcomhost.com/Ameli-Assurance/remboursement/login/iframe-page1.html,,ERROR,,,,,,,HTTP 429
+http://000m8ih.wcomhost.com/nass1/c5487/index_2.html,,ERROR,,,,,,,HTTP 429
+http://000agreementmail.weebly.com,,ERROR,,,,,,,HTTP 429
+http://000o8dc.wcomhost.com/www.santanderbanco.es/bancosantander/es/particulares/Santander/584afb0ead7021795f04d7a317fe3b61/Mi_cuenta.php,,ERROR,,,,,,,HTTP 429
+http://000m8ih.wcomhost.com/nass1/c6b64/index_2.html,,ERROR,,,,,,,HTTP 429
+http://000p6vl.wcomhost.com/Ameli-Assurance/remboursement/login/iframe-page2.html,,ERROR,,,,,,,HTTP 429
+http://000o8dc.wcomhost.com/www.santanderbanco.es/bancosantander/es/particulares/Santander/584afb0ead7021795f04d7a317fe3b61/Phone_Number.php,,ERROR,,,,,,,HTTP 429
+http://0.0.0assets.cryptonight.net,,ERROR,,,,,,,HTTP 429
+http://000m8ih.wcomhost.com/nass1/fe249/index_2.html,,ERROR,,,,,,,HTTP 429
+http://000chgojhd78jhvbwreuvk.webnode.com,,ERROR,,,,,,,HTTP 429
+http://000p6vl.wcomhost.com/Ameli-Assurance/remboursement/login/iframe-page3.html,,ERROR,,,,,,,HTTP 429
+http://000o8dc.wcomhost.com/www.santanderbanco.es/bancosantander/es/particulares/Santander/584afb0ead7021795f04d7a317fe3b61/sms_codigo.php,,ERROR,,,,,,,HTTP 429
+http://000m8ih.wcomhost.com/papa/3d7bf/index_2.html,,ERROR,,,,,,,HTTP 429
+http://000m8ih.wcomhost.com/papa/24083/index_2.html,,ERROR,,,,,,,HTTP 429
+http://000p7l3.wcomhost.com/Ameli-Assurance/remboursement/login,,ERROR,,,,,,,HTTP 429
