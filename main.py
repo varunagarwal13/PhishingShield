@@ -408,18 +408,12 @@ def validate_url(url: str):
         raise HTTPException(status_code=400, detail="URL has no recognisable domain.")
 
 
-# Fix #4: SSRF guard — block private/loopback IPs before fetching page content
+# Fix #4: SSRF guard — block private/loopback/reserved IPs before fetching page
+# content. Delegates to the shared UrlSecurityService (app/services/url_security.py)
+# instead of a local literal-IP-only check, so DNS-resolved private addresses
+# (DNS rebinding) are caught too, not just URLs with a literal private IP.
 def is_private_host(url: str) -> bool:
-    try:
-        parsed = urlparse(url)
-        host = parsed.hostname
-        if not host:
-            return True
-        addr = ipaddress.ip_address(host)
-        return addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved
-    except ValueError:
-        # hostname is a domain name, not an IP — allow it through
-        return False
+    return app.state.url_security.is_private_host(url)
 
 
 def extract_features(url: str, feature_cols: list) -> dict:
@@ -486,25 +480,38 @@ def extract_features(url: str, feature_cols: list) -> dict:
 
 # Fix #4: ssl=False intentional — phishing pages often have bad/self-signed certs.
 # Page text is only used for NLP scoring, never for security decisions.
-# SSRF mitigated by is_private_host() called before this function.
+# SSRF mitigated by is_private_host() re-checked before every request AND every
+# redirect hop, since aiohttp follows redirects automatically by default and a
+# malicious/rebinding redirect target must be re-validated, not just the
+# original URL.
 async def fetch_page_text(url: str) -> str:
-    if is_private_host(url):
-        logger.warning(f"Blocked fetch to private/loopback host: {url}")
-        return ""
+    current_url = url
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url,
-                timeout=aiohttp.ClientTimeout(total=4),
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-                ssl=False
-            ) as resp:
-                html = await resp.text()
-                soup = BeautifulSoup(html, "html.parser")
-                for tag in soup(["script","style","meta","link"]):
-                    tag.decompose()
-                text = soup.get_text(separator=" ", strip=True)
-                return text[:3000]
+            for _ in range(6):
+                if is_private_host(current_url):
+                    logger.warning(f"Blocked fetch to private/loopback host: {current_url}")
+                    return ""
+                async with session.get(
+                    current_url,
+                    timeout=aiohttp.ClientTimeout(total=4),
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+                    ssl=False,
+                    allow_redirects=False,
+                ) as resp:
+                    if resp.status in (301, 302, 303, 307, 308):
+                        location = resp.headers.get("Location")
+                        if not location:
+                            return ""
+                        current_url = str(resp.url.join(aiohttp.client.URL(location)))
+                        continue
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, "html.parser")
+                    for tag in soup(["script", "style", "meta", "link"]):
+                        tag.decompose()
+                    text = soup.get_text(separator=" ", strip=True)
+                    return text[:3000]
+        return ""
     except aiohttp.ClientError as e:
         logger.warning(f"Page fetch network error for {url}: {e}")
         return ""
