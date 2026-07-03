@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, String, Float, Integer, DateTime, Text, ForeignKey
+from sqlalchemy import create_engine, Column, String, Float, Integer, DateTime, Text, ForeignKey, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime, timezone
@@ -34,6 +34,12 @@ class ThreatLog(Base):
     vt_malicious= Column(Integer, nullable=True)
     vt_total    = Column(Integer, nullable=True)
     cached      = Column(Integer, default=0)
+    detector_outputs = Column(Text, nullable=True)
+    execution_time = Column(Float, nullable=True)
+    screenshot_path = Column(String(2048), nullable=True)
+    html_hash = Column(String(64), nullable=True)
+    certificate_fingerprint = Column(String(128), nullable=True)
+    threat_intelligence_results = Column(Text, nullable=True)
     timestamp   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     user_feedback = Column(String(20), nullable=True)  # "correct", "false_positive", "false_negative"
 
@@ -58,7 +64,29 @@ class FeedbackLog(Base):
 
 def init_db():
     Base.metadata.create_all(bind=engine)
+    _apply_sqlite_additive_migrations()
     print(f"Database initialized: {DATABASE_URL}")
+
+
+def _apply_sqlite_additive_migrations():
+    if "sqlite" not in DATABASE_URL:
+        return
+    inspector = inspect(engine)
+    if not inspector.has_table("threat_log"):
+        return
+    existing_columns = {column["name"] for column in inspector.get_columns("threat_log")}
+    migrations = {
+        "detector_outputs": "TEXT",
+        "execution_time": "FLOAT",
+        "screenshot_path": "VARCHAR(2048)",
+        "html_hash": "VARCHAR(64)",
+        "certificate_fingerprint": "VARCHAR(128)",
+        "threat_intelligence_results": "TEXT",
+    }
+    with engine.begin() as connection:
+        for column_name, column_type in migrations.items():
+            if column_name not in existing_columns:
+                connection.execute(text(f"ALTER TABLE threat_log ADD COLUMN {column_name} {column_type}"))
 
 
 def get_db():
