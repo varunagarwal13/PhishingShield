@@ -1,0 +1,92 @@
+[
+  {
+    "url": "https://secure-chase-online-access.com/login",
+    "label": 1,
+    "campaign": "Banking Phishing"
+  },
+  {
+    "url": "http://wellsfargo-verify-account.info/signin",
+    "label": 1,
+    "campaign": "Banking Phishing"
+  },
+  {
+    "url": "http://bofa-checking-security-alert.net/auth",
+    "label": 1,
+    "campaign": "Banking Phishing"
+  },
+  {
+    "url": "https://quick-invoice-payment.online/qr-pay.png",
+    "label": 1,
+    "campaign": "QR Phishing"
+  },
+  {
+    "url": "http://scan-qr-code-to-update-benefits.xyz/secure",
+    "label": 1,
+    "campaign": "QR Phishing"
+  },
+  {
+    "url": "https://microsoft-office365-upgrade-portal.com/login.html",
+    "label": 1,
+    "campaign": "Credential Harvesting"
+  },
+  {
+    "url": "http://google-accounts-verification-login.net/auth",
+    "label": 1,
+    "campaign": "Credential Harvesting"
+  },
+  {
+    "url": "https://paypal-webscr-billing-agreement.info/check",
+    "label": 1,
+    "campaign": "Credential Harvesting"
+  },
+  {
+    "url": "https://quickbooks-invoice-pdf-download.com/pay",
+    "label": 1,
+    "campaign": "Fake Invoices"
+  },
+  {
+    "url": "http://fedex-package-delivery-invoice.info/billing",
+    "label": 1,
+    "campaign": "Fake Invoices"
+  },
+  {
+    "url": "https://dhl-express-post-parcel.net/tracking",
+    "label": 1,
+    "campaign": "Fake Invoices"
+  },
+  {
+    "url": "https://metamask-extension-seed-recovery.info/wallet",
+    "label": 1,
+    "campaign": "Cryptocurrency Scam"
+  },
+  {
+    "url": "http://coinbase-auth-account-verification.xyz/signin",
+    "label": 1,
+    "campaign": "Cryptocurrency Scam"
+  },
+  {
+    "url": "https://google.com",
+    "label": 0,
+    "campaign": "Benign"
+  },
+  {
+    "url": "https://github.com",
+    "label": 0,
+    "campaign": "Benign"
+  },
+  {
+    "url": "https://wikipedia.org",
+    "label": 0,
+    "campaign": "Benign"
+  },
+  {
+    "url": "https://microsoft.com",
+    "label": 0,
+    "campaign": "Benign"
+  },
+  {
+    "url": "https://amazon.com",
+    "label": 0,
+    "campaign": "Benign"
+  }
+]

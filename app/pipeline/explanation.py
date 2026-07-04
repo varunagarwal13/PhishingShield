@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.schemas.detection import DetectorResult
+from app.models.detection import DetectorResult
 
 
 class ExplanationBuilder:

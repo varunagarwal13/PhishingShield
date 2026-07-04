@@ -1,39 +1,29 @@
-# Python
+# PhishingShield Release GitIgnore
 __pycache__/
-*.py[cod]
+*.pyc
 *.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
 .env
-*.egg-info/
-dist/
-build/
-.venv/
+.env.*
+
 venv/
+.venv/
 
-# Fix #5: ML model artefacts — store in object storage or DVC, not git
-# These files are large binaries; committing them bloats history and leaks model weights.
-*.pkl
-*.pickle
-*.joblib
-
-# Database
 *.db
 *.sqlite
 *.sqlite3
 
-# Logs
+logs/
+cache/
+
+training/cache/
+training/tmp/
+
 *.log
-
-# OS
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
-
-# Docker
-.dockerignore
-
-# Archives
-*.zip
-dump.rdb
+*.csv.tmp
+*.png.tmp
+*.pdf.tmp
+*.bak

@@ -1,0 +1,58 @@
+{
+  "brands": {
+    "google": {
+      "name": "Google",
+      "domains": ["google.com", "accounts.google.com"],
+      "title_keywords": ["google", "gmail", "accounts"],
+      "phash": "8f7e6d5c4b3a2910"
+    },
+    "microsoft": {
+      "name": "Microsoft",
+      "domains": ["microsoft.com", "live.com", "outlook.com", "login.microsoftonline.com"],
+      "title_keywords": ["microsoft", "outlook", "office 365", "sharepoint"],
+      "phash": "1a2b3c4d5e6f7a8b"
+    },
+    "apple": {
+      "name": "Apple",
+      "domains": ["apple.com", "icloud.com"],
+      "title_keywords": ["apple", "icloud", "appleid"],
+      "phash": "a1b2c3d4e5f60718"
+    },
+    "amazon": {
+      "name": "Amazon",
+      "domains": ["amazon.com", "aws.amazon.com"],
+      "title_keywords": ["amazon", "prime", "aws"],
+      "phash": "f1e2d3c4b5a69788"
+    },
+    "paypal": {
+      "name": "PayPal",
+      "domains": ["paypal.com"],
+      "title_keywords": ["paypal", "invoice", "payment"],
+      "phash": "2c3d4e5f6a7b8c9d"
+    },
+    "github": {
+      "name": "GitHub",
+      "domains": ["github.com"],
+      "title_keywords": ["github", "gist"],
+      "phash": "7d8e9f0a1b2c3d4e"
+    },
+    "meta": {
+      "name": "Meta / Facebook",
+      "domains": ["facebook.com", "instagram.com"],
+      "title_keywords": ["facebook", "instagram", "meta"],
+      "phash": "9a8b7c6d5e4f3a2b"
+    },
+    "linkedin": {
+      "name": "LinkedIn",
+      "domains": ["linkedin.com"],
+      "title_keywords": ["linkedin"],
+      "phash": "4c5d6e7f8a9b0c1d"
+    },
+    "dropbox": {
+      "name": "Dropbox",
+      "domains": ["dropbox.com"],
+      "title_keywords": ["dropbox"],
+      "phash": "3c4d5e6f7a8b9c0d"
+    }
+  }
+}

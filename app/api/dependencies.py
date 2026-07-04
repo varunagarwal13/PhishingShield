@@ -2,41 +2,34 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from fastapi import Request
 
-from app.config.settings import get_settings
-from app.pipeline.aggregator import RiskAggregator
-from app.pipeline.explanation import ExplanationBuilder
 from app.pipeline.pipeline import DetectionPipeline
-from app.services.feature_service import FeatureService
-from app.services.html_service import HtmlService
-from app.services.url_security import UrlSecurityService
-from app.services.vt_service import VirusTotalService
+from app.services.cache import CacheService
+from app.services.puppeteer import PuppeteerService
+from app.services.scoring import ScoringService
+from app.utils.url_utils import UrlSecurityService
+from config.settings import get_settings
 
 
-def build_pipeline(app_state: Any = None) -> DetectionPipeline:
-    """Build a pipeline instance from settings and app state."""
+def build_pipeline() -> DetectionPipeline:
+    """Build the production pipeline instance using modernized services."""
     settings = get_settings()
     url_security = UrlSecurityService(settings.trusted_domains_path)
-    services = {
-        "html": HtmlService(url_security, settings.http_timeout_seconds, settings.verify_ssl),
-        "virustotal": VirusTotalService(settings.vt_api_key, settings.http_timeout_seconds),
-        "features": FeatureService(),
-    }
+    cache_service = CacheService(settings.redis_url)
+    puppeteer_service = PuppeteerService()
+    scoring_service = ScoringService(settings.weights)
+
     return DetectionPipeline(
         url_security=url_security,
-        services=services,
-        aggregator=RiskAggregator(settings.detector_weights),
-        explanation_builder=ExplanationBuilder(),
-        enabled_detectors=settings.enabled_detectors,
+        cache_service=cache_service,
+        puppeteer_service=puppeteer_service,
+        scoring_service=scoring_service,
     )
 
 
 def get_pipeline(request: Request) -> DetectionPipeline:
     """Return the app-scoped pipeline, creating it lazily when needed."""
-    if not hasattr(request.app.state, "detection_pipeline"):
-        request.app.state.detection_pipeline = build_pipeline(request.app.state)
+    if not hasattr(request.app.state, "detection_pipeline") or request.app.state.detection_pipeline is None:
+        request.app.state.detection_pipeline = build_pipeline()
     return request.app.state.detection_pipeline
-

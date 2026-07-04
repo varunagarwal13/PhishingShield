@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.schemas.detection import DetectorResult, Severity
+from app.models.detection import DetectorResult, Severity
 
 
 @dataclass(slots=True)

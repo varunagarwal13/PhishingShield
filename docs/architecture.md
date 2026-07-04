@@ -1,63 +1,22 @@
-# Classifier Modernization Architecture
+# PhishingShield Architecture
 
-## Overview
+This document describes the high-level architecture of the PhishingShield system.
 
-The project now supports a modular production architecture while preserving the original FastAPI endpoints. The legacy `/check`, `/logs`, `/feedback`, `/health`, and `/metrics` routes remain available. The new versioned pipeline is exposed at `/api/v1/analyze` with detector-level evidence and weighted risk aggregation.
+## System Overview
 
-## Component Diagram
-
-```mermaid
-flowchart LR
-    Client["API Client"] --> Middleware["Request Context Middleware"]
-    Middleware --> Routes["FastAPI Routes"]
-    Routes --> Pipeline["DetectionPipeline"]
-    Pipeline --> Aggregator["RiskAggregator"]
-    Pipeline --> Explanation["ExplanationBuilder"]
-    Pipeline --> ML["MLDetector"]
-    Pipeline --> Heuristic["HeuristicDetector"]
-    Pipeline --> Reputation["ReputationDetector"]
-    Pipeline --> HTML["HtmlDetector"]
-    Pipeline --> DNS["DNSDetector"]
-    Pipeline --> SSL["SSLDetector"]
-    Pipeline --> WHOIS["WhoisDetector"]
-    Pipeline --> OCR["OCRDetector"]
-    Pipeline --> Favicon["FaviconDetector"]
-    Reputation --> VT["VirusTotalService"]
-    HTML --> HtmlService["HtmlService"]
-    ML --> FeatureService["FeatureService"]
-    Routes --> DB["ThreatLogRepository"]
-```
-
-## Detection Sequence
+PhishingShield is a real-time, explainable web application and URL security system designed to detect and block phishing attacks.
 
 ```mermaid
-sequenceDiagram
-    participant C as Client
-    participant A as API
-    participant P as DetectionPipeline
-    participant D as Detectors
-    participant R as RiskAggregator
-    C->>A: POST /api/v1/analyze
-    A->>P: DetectionRequest
-    P->>P: Canonicalize URL and build context
-    P->>D: Run enabled detectors with asyncio.gather
-    D-->>P: DetectorResult list
-    P->>D: Run lazy OCR if required
-    P->>R: Weighted aggregation
-    R-->>P: Final risk score and verdict
-    P-->>A: DetectionResponse with explanations
-    A-->>C: JSON response
+graph TD
+    A[Inbound URL Request] --> B[Fast URL Checks]
+    B --> C[Parallel Detectors stage]
+    C --> D[Voting Ensemble Scorer]
+    D --> E[Explainability Engine]
+    E --> F[API JSON Response]
 ```
 
-## Production Features
+## Core Modules
 
-- Modular `app/` package with `api`, `config`, `detectors`, `pipeline`, `services`, `schemas`, `database`, and `models`.
-- Detector plugin contract: `analyze()`, `explain()`, and `health_check()`.
-- Parallel detector execution with failure isolation.
-- Weighted risk aggregation with configurable detector weights.
-- Explainable AI response reasons from detector evidence.
-- URL canonicalization, punycode conversion, percent-decoding, homograph skeletons, SSRF private-host guard, and dynamic trusted-domain reload.
-- Model integrity verification hook for SHA256 and version metadata.
-- JSON logging formatter, Prometheus text metrics endpoint, health/readiness/liveness endpoints, request IDs, and correlation IDs.
-- Optional threat-intelligence adapter classes for Google Safe Browsing, OpenPhish, PhishTank, URLHaus, AbuseIPDB, and Cloudflare Radar.
-
+- **Stage 1 (Parallel Detectors)**: Lexical URL analysis, visual hash matches, DOM structural complexity checks, Threat Intelligence, and Browser behavior detectors.
+- **Stage 2 (Ensemble Machine Learning Scorer)**: A Calibrated Voting Classifier that aggregates base predictions into a calibrated probability.
+- **Stage 3 (Explainability)**: Maps predictions to MITRE ATT&CK techniques and prioritized reason strings.

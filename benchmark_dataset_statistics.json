@@ -1,0 +1,7 @@
+{
+  "total_urls": 73385,
+  "benign_count": 35885,
+  "malicious_count": 37500,
+  "class_balance_ratio": 0.5110036110921851,
+  "leakage_overlap_count": 0
+}

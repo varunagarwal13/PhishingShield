@@ -1,0 +1,33 @@
+{
+  "dataset_version": "3.0.0",
+  "total_urls": 261705,
+  "malicious_urls": 76474,
+  "benign_urls": 185231,
+  "duplicate_removal_count": 15201,
+  "domain_overlap": {
+    "overlap_count": 150,
+    "overlap_list": [
+      "smarthost.pl",
+      "zapier.app",
+      "free.nf",
+      "qzz.io",
+      "uc.cn",
+      "ydns.eu",
+      "org.ru",
+      "nokia.com",
+      "telecomitalia.it",
+      "us.com"
+    ]
+  },
+  "train_test_distribution": {
+    "train_size": 130280,
+    "test_size": 47220
+  },
+  "provenance_licenses": {
+    "PhishTank": "PhishTank Terms of Use / CC-BY-NC",
+    "URLHaus": "Creative Commons CC0 (Public Domain)",
+    "OpenPhish": "OpenPhish Free Feed Attribution",
+    "Tranco": "Creative Commons Attribution 4.0 International",
+    "CiscoUmbrella": "Cisco Umbrella Attribution License"
+  }
+}

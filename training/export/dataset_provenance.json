@@ -1,0 +1,15 @@
+{
+  "validation_timestamp": "1783141448.0133502",
+  "total_raw_samples": 176279,
+  "deduplicated_samples": 175849,
+  "validated_samples": 175849,
+  "splits": {
+    "train_size": 124410,
+    "test_size": 33670
+  },
+  "provenance_sources": {
+    "PhishTank": "PhishTank Terms of Use / CC-BY-NC",
+    "URLHaus": "Creative Commons CC0 (Public Domain)",
+    "Tranco": "Creative Commons Attribution 4.0 International"
+  }
+}
